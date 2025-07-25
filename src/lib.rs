@@ -20,6 +20,7 @@ pub mod secrets;
 pub mod shell;
 pub mod shell_hook;
 pub mod state;
+pub mod task_cache;
 pub mod task_executor;
 pub mod types;
 pub mod xdg;

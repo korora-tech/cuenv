@@ -53,6 +53,11 @@ pub struct TaskConfig {
     pub inputs: Option<Vec<String>>,
     pub outputs: Option<Vec<String>>,
     pub security: Option<SecurityConfig>,
+    /// Enable build cache for this task (Bazel-style caching)
+    pub cache: Option<bool>,
+    /// Custom cache key - if not provided, will be derived from inputs
+    #[serde(rename = "cacheKey")]
+    pub cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +77,6 @@ pub struct SecurityConfig {
     /// Automatically infer disk restrictions from task inputs/outputs
     #[serde(rename = "inferFromInputsOutputs")]
     pub infer_from_inputs_outputs: Option<bool>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

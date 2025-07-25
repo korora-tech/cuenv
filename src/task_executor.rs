@@ -1,6 +1,7 @@
 use crate::cue_parser::TaskConfig;
 use crate::env_manager::EnvManager;
 use crate::errors::{Error, Result};
+use crate::task_cache::TaskCache;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,6 +21,7 @@ pub struct TaskExecutionPlan {
 pub struct TaskExecutor {
     env_manager: EnvManager,
     working_dir: PathBuf,
+    task_cache: TaskCache,
 }
 
 impl TaskExecutor {
@@ -28,6 +30,7 @@ impl TaskExecutor {
         Self {
             env_manager,
             working_dir,
+            task_cache: TaskCache::new(),
         }
     }
 
@@ -65,12 +68,15 @@ impl TaskExecutor {
                 let task_args = args.to_vec();
                 let failed_tasks = Arc::clone(&failed_tasks);
                 let task_name = task_name.clone();
+                let task_cache = TaskCache::new(); // Create cache instance for this task
 
                 join_set.spawn(async move {
-                    match Self::execute_single_task(
+                    match Self::execute_single_task_with_cache(
+                        &task_name,
                         &task_config,
                         &working_dir,
                         &task_args,
+                        &task_cache,
                         audit_mode,
                     )
                     .await
@@ -267,6 +273,35 @@ impl TaskExecutor {
         }
 
         Ok(levels)
+    }
+
+    /// Execute a single task with caching support
+    async fn execute_single_task_with_cache(
+        task_name: &str,
+        task_config: &TaskConfig,
+        working_dir: &Path,
+        args: &[String],
+        task_cache: &TaskCache,
+    ) -> Result<i32> {
+        // Generate cache key
+        let cache_key = task_cache.generate_cache_key(task_name, task_config, working_dir)?;
+
+        // Check if task result is cached
+        if let Some(cached_result) = task_cache.get_cached_result(&cache_key, task_config, working_dir)? {
+            println!("✓ Task '{}' found in cache, skipping execution", task_name);
+            return Ok(cached_result.exit_code);
+        }
+
+        // Execute the task
+        println!("→ Executing task '{}'", task_name);
+        let exit_code = Self::execute_single_task(task_config, working_dir, args).await?;
+
+        // Cache the result
+        if let Err(e) = task_cache.save_result(&cache_key, task_config, working_dir, exit_code) {
+            log::warn!("Failed to cache task '{}' result: {}", task_name, e);
+        }
+
+        Ok(exit_code)
     }
 
     /// Execute a single task
