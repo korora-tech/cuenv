@@ -1,14 +1,26 @@
-# Task Support Example
+# Tasks Example with Build Cache
 
-This example demonstrates cuenv's task support functionality, which allows you to define and execute project-specific tasks with dependency management.
+This example demonstrates cuenv's powerful task system with the new Bazel-style build cache support.
 
 ## Features Demonstrated
 
 - **Task Definition**: Define tasks with descriptions, commands/scripts, and dependencies
+- **Build Cache**: Bazel-style caching with content-based cache keys and automatic invalidation
 - **Dependency Resolution**: Tasks automatically execute their dependencies in the correct order
 - **Parallel Execution**: Independent tasks run concurrently for better performance
 - **Environment Inheritance**: Tasks inherit all environment variables from env.cue
-- **Command vs Script**: Support for both single commands and multi-line scripts
+- **Input/Output Tracking**: Track file dependencies for intelligent cache invalidation
+
+## Build Cache Features
+
+The build cache system provides enterprise-grade caching with:
+
+- **Content-based Cache Keys**: SHA256 hashing of task configuration + input file contents
+- **Input Tracking**: Automatic cache invalidation when input files change
+- **Output Validation**: Cached tasks verified by checking output file existence and hashes
+- **Dependency-aware**: Works seamlessly with task dependency resolution
+- **Custom Cache Keys**: Support for user-defined cache keys with `cacheKey` field
+- **Selective Caching**: Tasks can disable caching with `cache: false`
 
 ## Usage
 
@@ -18,16 +30,23 @@ This example demonstrates cuenv's task support functionality, which allows you t
 cuenv run
 ```
 
-### Execute a Task
+### Execute a Task (with caching)
 
 ```bash
-cuenv run <task_name>
+cuenv run lint        # First run executes
+cuenv run lint        # Second run uses cache
 ```
 
-### Execute Task with Arguments
+### Execute Task with Dependencies
 
 ```bash
-cuenv run <task_name> -- --arg1 value1 --arg2 value2
+cuenv run build      # Executes lint → test → build (if not cached)
+```
+
+### Clear Build Cache
+
+```bash
+cuenv clear-cache
 ```
 
 ## Task Definition Schema
@@ -41,39 +60,69 @@ tasks: {
         dependencies: ["other-task1", "other-task2"] // Optional
         workingDir: "./relative/path"                 // Optional
         shell: "bash"                                 // Optional (default: "sh")
-        inputs: ["src/**/*.go"]                       // Future feature
-        outputs: ["bin/myapp"]                        // Future feature
+        cache: true                                   // Enable build cache
+        inputs: ["src/**/*.go", "tests/**/*"]         // Files to track for cache invalidation
+        outputs: ["bin/myapp", "build/artifacts/*"]   // Output files for cache validation
+        cacheKey: "custom-key"                        // Optional custom cache key
     }
 }
 ```
 
 ## Example Tasks in this Directory
 
-- **lint**: Lints the code (no dependencies)
-- **test**: Runs tests (depends on lint)
-- **build**: Builds the project (depends on test)
-- **deploy**: Deploys the application (depends on build)
-- **clean**: Cleans build artifacts (independent)
-- **script-example**: Demonstrates multi-line script execution
+- **lint**: Lints the code (cached, tracks `src/*`)
+- **test**: Runs tests (cached, depends on lint, tracks `src/*` and `tests/*`)
+- **build**: Builds the project (cached, depends on test, outputs to `build/app`)
+- **deploy**: Deploys the application (not cached, depends on build)
+- **clean**: Cleans build artifacts (not cached, always runs)
+- **script-example**: Demonstrates multi-line script with caching
 
-## Task Execution Flow
+## Cache Behavior Examples
 
-When you run `cuenv run deploy`, the execution order will be:
+### Initial Run
+```bash
+$ cuenv run build
+→ Executing task 'lint'
+Linting code...
+→ Executing task 'test'  
+Running tests...
+→ Executing task 'build'
+Building project...
+```
 
-1. **lint** (executes first, no dependencies)
-2. **test** (executes after lint completes)
-3. **build** (executes after test completes)
-4. **deploy** (executes after build completes)
+### Subsequent Run (All Cached)
+```bash
+$ cuenv run build
+✓ Task 'lint' found in cache, skipping execution
+✓ Task 'test' found in cache, skipping execution  
+✓ Task 'build' found in cache, skipping execution
+```
 
-If multiple tasks have no outstanding dependencies, they execute in parallel.
+### After Modifying Input File
+```bash
+$ echo "// comment" >> src/main.rs
+$ cuenv run build
+→ Executing task 'lint'       # Cache invalidated due to input change
+Linting code...
+✓ Task 'test' found in cache, skipping execution  # Different inputs
+→ Executing task 'build'      # Cache invalidated due to dependency change
+Building project...
+```
+
+## Cache Storage
+
+- **Location**: `~/.cache/cuenv/tasks/`
+- **Format**: JSON files with SHA256 filenames
+- **Contents**: Exit code, output file hashes, execution timestamp
+- **Cleanup**: Use `cuenv clear-cache` to remove all cached results
 
 ## Error Handling
 
 - **Missing Task**: Error if requested task doesn't exist
 - **Missing Dependency**: Error if task depends on non-existent task
 - **Circular Dependencies**: Detected and reported as error
-- **Task Failure**: Stops execution and reports which task failed
-- **Exit Codes**: Task exit codes are propagated to cuenv
+- **Task Failure**: Failed tasks are not cached, stops execution chain
+- **Cache Corruption**: Automatic cache invalidation on file corruption
 
 ## Environment Variables
 
@@ -84,3 +133,14 @@ All tasks automatically inherit environment variables defined in the env.cue fil
 - `PORT`: 3000
 
 These are available as `$DATABASE_URL`, `$API_KEY`, `$PORT` in task commands/scripts.
+
+## Performance Benefits
+
+The build cache dramatically improves development workflows:
+
+- **Skip redundant compilation**: Only rebuild when source files change
+- **Faster CI/CD**: Reuse artifacts across pipeline stages
+- **Incremental builds**: Smart dependency tracking
+- **Team collaboration**: Shared cache improves team productivity
+
+This makes cuenv ideal for monorepos and complex build pipelines where build performance is critical.
