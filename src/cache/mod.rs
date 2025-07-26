@@ -1,5 +1,5 @@
 //! Moon-style caching system for cuenv tasks
-//! 
+//!
 //! This module provides a robust, battle-tested caching infrastructure
 //! inspired by the moon build tool's cache system.
 
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// Resolve a cache path relative to the cache directory
 pub(crate) fn resolve_cache_path(cache_dir: &Path, path: impl AsRef<OsStr>) -> PathBuf {
     let path = PathBuf::from(path.as_ref());
-    
+
     let mut resolved = if path.is_absolute() {
         path
     } else {

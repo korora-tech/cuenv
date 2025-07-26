@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A cached item that can be loaded from and saved to disk
-pub struct CacheItem<T> 
-where 
+pub struct CacheItem<T>
+where
     T: Default + for<'de> Deserialize<'de> + Serialize,
 {
     pub data: T,
@@ -25,16 +25,13 @@ where
         if get_cache_mode().is_readable() {
             if full_path.exists() {
                 log::debug!("Cache hit, reading item from {:?}", full_path);
-                
-                let content = fs::read_to_string(&full_path).map_err(|e| {
-                    Error::file_system(full_path.clone(), "read cache item", e)
-                })?;
-                
-                data = serde_json::from_str(&content).map_err(|e| {
-                    Error::Json {
-                        message: "Failed to parse cached item".to_string(),
-                        source: e,
-                    }
+
+                let content = fs::read_to_string(&full_path)
+                    .map_err(|e| Error::file_system(full_path.clone(), "read cache item", e))?;
+
+                data = serde_json::from_str(&content).map_err(|e| Error::Json {
+                    message: "Failed to parse cached item".to_string(),
+                    source: e,
                 })?;
             } else {
                 log::debug!("Cache miss, item does not exist at {:?}", full_path);
@@ -43,9 +40,9 @@ where
             log::trace!("Cache is not readable, skipping checks for {:?}", full_path);
         }
 
-        Ok(CacheItem { 
-            data, 
-            path: full_path 
+        Ok(CacheItem {
+            data,
+            path: full_path,
         })
     }
 
@@ -61,16 +58,13 @@ where
                 })?;
             }
 
-            let content = serde_json::to_string_pretty(&self.data).map_err(|e| {
-                Error::Json {
-                    message: "Failed to serialize cache item".to_string(),
-                    source: e,
-                }
+            let content = serde_json::to_string_pretty(&self.data).map_err(|e| Error::Json {
+                message: "Failed to serialize cache item".to_string(),
+                source: e,
             })?;
 
-            fs::write(&self.path, content).map_err(|e| {
-                Error::file_system(self.path.clone(), "write cache item", e)
-            })?;
+            fs::write(&self.path, content)
+                .map_err(|e| Error::file_system(self.path.clone(), "write cache item", e))?;
         } else {
             log::trace!("Cache is not writable, skipping save for {:?}", self.path);
         }

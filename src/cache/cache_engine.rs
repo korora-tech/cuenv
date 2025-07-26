@@ -1,4 +1,4 @@
-use crate::cache::{CacheItem, CacheMode, HashEngine, get_cache_mode};
+use crate::cache::{get_cache_mode, CacheItem, CacheMode, HashEngine};
 use crate::errors::{Error, Result};
 use crate::xdg::XdgPaths;
 use serde::{Deserialize, Serialize};
@@ -12,13 +12,13 @@ use std::time::Duration;
 pub struct CacheEngine {
     /// The cache directory (e.g., ~/.cache/cuenv)
     pub cache_dir: PathBuf,
-    
+
     /// Hash engine for content-based caching
     pub hash: HashEngine,
-    
+
     /// Current cache mode
     mode: CacheMode,
-    
+
     /// Forced mode override
     forced_mode: RwLock<Option<CacheMode>>,
 }
@@ -27,13 +27,12 @@ impl CacheEngine {
     /// Create a new cache engine
     pub fn new() -> Result<CacheEngine> {
         let cache_dir = XdgPaths::cache_dir();
-        
+
         log::debug!("Creating cache engine with cache_dir: {:?}", cache_dir);
 
         // Create cache directory if it doesn't exist
-        fs::create_dir_all(&cache_dir).map_err(|e| {
-            Error::file_system(cache_dir.clone(), "create cache directory", e)
-        })?;
+        fs::create_dir_all(&cache_dir)
+            .map_err(|e| Error::file_system(cache_dir.clone(), "create cache directory", e))?;
 
         // Create cache directory tag for tools that understand them
         let cache_tag = cache_dir.join("CACHEDIR.TAG");
@@ -41,10 +40,9 @@ impl CacheEngine {
             let tag_content = r#"Signature: 8a477f597d28d172789f06886806bc55
 # This file is a cache directory tag created by cuenv.
 # For information see https://bford.info/cachedir"#;
-            
-            fs::write(&cache_tag, tag_content).map_err(|e| {
-                Error::file_system(cache_tag, "write cache directory tag", e)
-            })?;
+
+            fs::write(&cache_tag, tag_content)
+                .map_err(|e| Error::file_system(cache_tag, "write cache directory tag", e))?;
         }
 
         let hash = HashEngine::new(&cache_dir)?;
@@ -73,7 +71,10 @@ impl CacheEngine {
 
     /// Clean up stale cache entries older than the specified duration
     pub fn clean_stale_cache(&self, lifetime: Duration) -> Result<(usize, u64)> {
-        log::debug!("Cleaning up stale cached artifacts older than {:?}", lifetime);
+        log::debug!(
+            "Cleaning up stale cached artifacts older than {:?}",
+            lifetime
+        );
 
         let mut files_deleted = 0;
         let mut bytes_saved = 0;
@@ -95,7 +96,8 @@ impl CacheEngine {
 
         log::debug!(
             "Deleted {} artifacts and saved {} bytes",
-            files_deleted, bytes_saved
+            files_deleted,
+            bytes_saved
         );
 
         Ok((files_deleted, bytes_saved))
@@ -104,7 +106,7 @@ impl CacheEngine {
     /// Clear all cache entries
     pub fn clear(&self) -> Result<()> {
         log::debug!("Clearing all cache entries");
-        
+
         if self.cache_dir.exists() {
             // Remove contents but keep the directory itself
             let entries = fs::read_dir(&self.cache_dir).map_err(|e| {
@@ -115,20 +117,18 @@ impl CacheEngine {
                 let entry = entry.map_err(|e| {
                     Error::file_system(self.cache_dir.clone(), "read cache directory entry", e)
                 })?;
-                
+
                 let path = entry.path();
                 if path.file_name().unwrap_or_default() == "CACHEDIR.TAG" {
                     continue; // Keep the cache directory tag
                 }
 
                 if path.is_dir() {
-                    fs::remove_dir_all(&path).map_err(|e| {
-                        Error::file_system(path, "remove cache subdirectory", e)
-                    })?;
+                    fs::remove_dir_all(&path)
+                        .map_err(|e| Error::file_system(path, "remove cache subdirectory", e))?;
                 } else {
-                    fs::remove_file(&path).map_err(|e| {
-                        Error::file_system(path, "remove cache file", e)
-                    })?;
+                    fs::remove_file(&path)
+                        .map_err(|e| Error::file_system(path, "remove cache file", e))?;
                 }
             }
         }
@@ -173,9 +173,8 @@ impl CacheEngine {
 
         let cutoff_time = std::time::SystemTime::now() - max_age;
 
-        let entries = fs::read_dir(dir).map_err(|e| {
-            Error::file_system(dir.to_path_buf(), "read directory for cleanup", e)
-        })?;
+        let entries = fs::read_dir(dir)
+            .map_err(|e| Error::file_system(dir.to_path_buf(), "read directory for cleanup", e))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| {
@@ -190,17 +189,15 @@ impl CacheEngine {
             if let Ok(modified) = metadata.modified() {
                 if modified < cutoff_time {
                     let file_size = metadata.len();
-                    
+
                     if path.is_dir() {
-                        fs::remove_dir_all(&path).map_err(|e| {
-                            Error::file_system(path, "remove stale directory", e)
-                        })?;
+                        fs::remove_dir_all(&path)
+                            .map_err(|e| Error::file_system(path, "remove stale directory", e))?;
                     } else {
-                        fs::remove_file(&path).map_err(|e| {
-                            Error::file_system(path, "remove stale file", e)
-                        })?;
+                        fs::remove_file(&path)
+                            .map_err(|e| Error::file_system(path, "remove stale file", e))?;
                     }
-                    
+
                     files_deleted += 1;
                     bytes_saved += file_size;
                 }

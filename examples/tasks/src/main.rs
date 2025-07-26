@@ -2,4 +2,4 @@
 // Added a comment to trigger cache invalidation
 fn main() {
     println!("Hello, world!");
-}// Cache invalidation test
+} // Cache invalidation test

@@ -285,7 +285,9 @@ impl TaskExecutor {
         let cache_key = task_cache.generate_cache_key(task_name, task_config, working_dir)?;
 
         // Check if task result is cached
-        if let Some(cached_result) = task_cache.get_cached_result(&cache_key, task_config, working_dir)? {
+        if let Some(cached_result) =
+            task_cache.get_cached_result(&cache_key, task_config, working_dir)?
+        {
             println!("✓ Task '{}' found in cache, skipping execution", task_name);
             return Ok(cached_result.exit_code);
         }

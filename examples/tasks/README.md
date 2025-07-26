@@ -80,25 +80,28 @@ tasks: {
 ## Cache Behavior Examples
 
 ### Initial Run
+
 ```bash
 $ cuenv run build
 → Executing task 'lint'
 Linting code...
-→ Executing task 'test'  
+→ Executing task 'test'
 Running tests...
 → Executing task 'build'
 Building project...
 ```
 
 ### Subsequent Run (All Cached)
+
 ```bash
 $ cuenv run build
 ✓ Task 'lint' found in cache, skipping execution
-✓ Task 'test' found in cache, skipping execution  
+✓ Task 'test' found in cache, skipping execution
 ✓ Task 'build' found in cache, skipping execution
 ```
 
 ### After Modifying Input File
+
 ```bash
 $ echo "// comment" >> src/main.rs
 $ cuenv run build

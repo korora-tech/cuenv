@@ -50,7 +50,10 @@ impl TaskCache {
         task_config: &TaskConfig,
         working_dir: &Path,
     ) -> Result<String> {
-        let mut hasher = self.cache_engine.hash.create_hasher(&format!("task:{}", task_name));
+        let mut hasher = self
+            .cache_engine
+            .hash
+            .create_hasher(&format!("task:{}", task_name));
 
         // Use custom cache key if provided
         if let Some(custom_key) = &task_config.cache_key {
@@ -69,10 +72,10 @@ impl TaskCache {
         }
 
         let hash = hasher.generate_hash()?;
-        
+
         // Save the hash manifest
         self.cache_engine.hash.save_manifest(&hasher, &hash)?;
-        
+
         Ok(hash)
     }
 
@@ -93,13 +96,13 @@ impl TaskCache {
             return Ok(None);
         }
 
-        let cache_item = self.cache_engine.cache::<CachedTaskResult>(
-            format!("tasks/{}", cache_key)
-        )?;
+        let cache_item = self
+            .cache_engine
+            .cache::<CachedTaskResult>(format!("tasks/{}", cache_key))?;
 
         if cache_item.path.exists() {
             let cached_result = cache_item.data;
-            
+
             // Verify cache key matches
             if cached_result.cache_key != cache_key {
                 return Ok(None);
@@ -109,13 +112,16 @@ impl TaskCache {
             if let Some(outputs) = &task_config.outputs {
                 for output_pattern in outputs {
                     let output_files = self.expand_glob(output_pattern, working_dir)?;
-                    
+
                     // Check if we have any expected outputs from cache but no actual files
                     if output_files.is_empty() && !cached_result.output_hashes.is_empty() {
-                        log::debug!("Cache miss: expected output files for pattern '{}' but found none", output_pattern);
+                        log::debug!(
+                            "Cache miss: expected output files for pattern '{}' but found none",
+                            output_pattern
+                        );
                         return Ok(None);
                     }
-                    
+
                     for output_file in output_files {
                         let relative_path = output_file
                             .strip_prefix(working_dir)
@@ -125,12 +131,16 @@ impl TaskCache {
 
                         // Check if output file exists
                         if !output_file.exists() {
-                            log::debug!("Cache miss: output file {:?} no longer exists", output_file);
+                            log::debug!(
+                                "Cache miss: output file {:?} no longer exists",
+                                output_file
+                            );
                             return Ok(None);
                         }
 
                         // Check if output file hash matches
-                        if let Some(expected_hash) = cached_result.output_hashes.get(&relative_path) {
+                        if let Some(expected_hash) = cached_result.output_hashes.get(&relative_path)
+                        {
                             let current_hash = self.hash_file(&output_file)?;
                             if &current_hash != expected_hash {
                                 log::debug!(
@@ -142,12 +152,15 @@ impl TaskCache {
                         }
                     }
                 }
-                
+
                 // Additional check: verify all cached output files still exist
                 for (cached_path, _) in &cached_result.output_hashes {
                     let full_path = working_dir.join(cached_path);
                     if !full_path.exists() {
-                        log::debug!("Cache miss: cached output file {:?} no longer exists", full_path);
+                        log::debug!(
+                            "Cache miss: cached output file {:?} no longer exists",
+                            full_path
+                        );
                         return Ok(None);
                     }
                 }
@@ -206,9 +219,9 @@ impl TaskCache {
             output_hashes,
         };
 
-        let mut cache_item = self.cache_engine.cache::<CachedTaskResult>(
-            format!("tasks/{}", cache_key)
-        )?;
+        let mut cache_item = self
+            .cache_engine
+            .cache::<CachedTaskResult>(format!("tasks/{}", cache_key))?;
         cache_item.data = cached_result;
         cache_item.save()?;
 
@@ -234,16 +247,15 @@ impl TaskCache {
             let parent = full_pattern.parent().unwrap_or(working_dir);
             if parent.exists() {
                 let mut files = Vec::new();
-                let entries = fs::read_dir(parent).map_err(|e| {
-                    Error::file_system(parent.to_path_buf(), "read directory", e)
-                })?;
+                let entries = fs::read_dir(parent)
+                    .map_err(|e| Error::file_system(parent.to_path_buf(), "read directory", e))?;
 
                 for entry in entries {
                     let entry = entry.map_err(|e| {
                         Error::file_system(parent.to_path_buf(), "read directory entry", e)
                     })?;
                     let path = entry.path();
-                    
+
                     if path.is_file() {
                         if let Some(filename) = path.file_name() {
                             let pattern_name = full_pattern
@@ -270,14 +282,12 @@ impl TaskCache {
 
     /// Recursively collect all files in a directory
     fn collect_files_recursive(&self, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-        let entries = fs::read_dir(dir).map_err(|e| {
-            Error::file_system(dir.to_path_buf(), "read directory", e)
-        })?;
+        let entries = fs::read_dir(dir)
+            .map_err(|e| Error::file_system(dir.to_path_buf(), "read directory", e))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                Error::file_system(dir.to_path_buf(), "read directory entry", e)
-            })?;
+            let entry = entry
+                .map_err(|e| Error::file_system(dir.to_path_buf(), "read directory entry", e))?;
             let path = entry.path();
             if path.is_file() {
                 files.push(path);
@@ -291,10 +301,9 @@ impl TaskCache {
     /// Calculate SHA256 hash of a file
     fn hash_file(&self, file_path: &Path) -> Result<String> {
         use sha2::{Digest, Sha256};
-        
-        let content = fs::read(file_path).map_err(|e| {
-            Error::file_system(file_path.to_path_buf(), "read file for hashing", e)
-        })?;
+
+        let content = fs::read(file_path)
+            .map_err(|e| Error::file_system(file_path.to_path_buf(), "read file for hashing", e))?;
 
         let mut hasher = Sha256::new();
         hasher.update(&content);
@@ -308,8 +317,6 @@ impl Default for TaskCache {
         Self::new().expect("Failed to create default task cache")
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
