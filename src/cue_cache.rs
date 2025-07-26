@@ -59,7 +59,12 @@ impl CueCache {
     /// Save parse result to cache
     pub fn save(cue_file: &Path, result: &ParseResult) -> Result<(), std::io::Error> {
         let cache_file = XdgPaths::cache_file(&cue_file.to_path_buf());
-        let cache_dir = cache_file.parent().unwrap();
+        let cache_dir = cache_file.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cache file path has no parent directory",
+            )
+        })?;
 
         // Create cache directory if it doesn't exist with retry
         if !cache_dir.exists() {
@@ -118,10 +123,10 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_cache_save_and_get() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_cache_save_and_get() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
         let cue_file = temp_dir.path().join("test.cue");
-        fs::write(&cue_file, "package env").unwrap();
+        fs::write(&cue_file, "package env")?;
 
         // Create a parse result
         let mut result = ParseResult::default();
@@ -130,28 +135,32 @@ mod tests {
             .insert("FOO".to_string(), "bar".to_string());
 
         // Save to cache
-        CueCache::save(&cue_file, &result).unwrap();
+        CueCache::save(&cue_file, &result).expect("Failed to save to cache");
 
         // Get from cache
-        let cached = CueCache::get(&cue_file).unwrap();
+        let cached = CueCache::get(&cue_file).expect("Failed to get from cache");
         assert_eq!(cached.variables.get("FOO"), Some(&"bar".to_string()));
+
+        Ok(())
     }
 
     #[test]
-    fn test_cache_invalidation() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_cache_invalidation() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
         let cue_file = temp_dir.path().join("test.cue");
-        fs::write(&cue_file, "package env").unwrap();
+        fs::write(&cue_file, "package env")?;
 
         // Create and save a parse result
         let result = ParseResult::default();
-        CueCache::save(&cue_file, &result).unwrap();
+        CueCache::save(&cue_file, &result).expect("Failed to save to cache");
 
         // Modify the file (with a small delay to ensure different mtime)
         std::thread::sleep(std::time::Duration::from_millis(10));
-        fs::write(&cue_file, "package env\n// modified").unwrap();
+        fs::write(&cue_file, "package env\n// modified")?;
 
         // Cache should be invalidated
         assert!(CueCache::get(&cue_file).is_none());
+
+        Ok(())
     }
 }

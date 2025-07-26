@@ -161,7 +161,9 @@ impl SecurityValidator {
             ));
         }
 
-        let first_char = name.chars().next().unwrap();
+        let first_char = name.chars().next().ok_or_else(|| {
+            Error::security("Environment variable name is unexpectedly empty".to_string())
+        })?;
         if !first_char.is_alphabetic() && first_char != '_' {
             return Err(Error::security(format!(
                 "Environment variable name '{}' must start with a letter or underscore",
@@ -380,18 +382,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_env_var_name() {
+    fn test_sanitize_env_var_name() -> Result<()> {
         // Valid names should pass
+        assert_eq!(SecurityValidator::sanitize_env_var_name("FOO")?, "FOO");
+        assert_eq!(SecurityValidator::sanitize_env_var_name("_BAR")?, "_BAR");
         assert_eq!(
-            SecurityValidator::sanitize_env_var_name("FOO").unwrap(),
-            "FOO"
-        );
-        assert_eq!(
-            SecurityValidator::sanitize_env_var_name("_BAR").unwrap(),
-            "_BAR"
-        );
-        assert_eq!(
-            SecurityValidator::sanitize_env_var_name("FOO_BAR_123").unwrap(),
+            SecurityValidator::sanitize_env_var_name("FOO_BAR_123")?,
             "FOO_BAR_123"
         );
 
@@ -401,6 +397,8 @@ mod tests {
         assert!(SecurityValidator::sanitize_env_var_name("FOO-BAR").is_err());
         assert!(SecurityValidator::sanitize_env_var_name("FOO BAR").is_err());
         assert!(SecurityValidator::sanitize_env_var_name("FOO$BAR").is_err());
+
+        Ok(())
     }
 
     #[test]
@@ -500,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_env_var_name_unicode() {
+    fn test_env_var_name_unicode() -> Result<()> {
         // Test unicode characters (should fail)
         assert!(SecurityValidator::sanitize_env_var_name("FOO_БАР").is_err());
         assert!(SecurityValidator::sanitize_env_var_name("FOO_🚀").is_err());
@@ -508,12 +506,14 @@ mod tests {
 
         // Test valid names with numbers
         assert_eq!(
-            SecurityValidator::sanitize_env_var_name("FOO123").unwrap(),
+            SecurityValidator::sanitize_env_var_name("FOO123")?,
             "FOO123"
         );
         assert_eq!(
-            SecurityValidator::sanitize_env_var_name("_123FOO").unwrap(),
+            SecurityValidator::sanitize_env_var_name("_123FOO")?,
             "_123FOO"
         );
+
+        Ok(())
     }
 }

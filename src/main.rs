@@ -112,6 +112,25 @@ enum Commands {
     Prune,
     /// Clear task cache
     ClearCache,
+    /// Cache management commands
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// Clear all cache entries
+    Clear,
+    /// Show cache statistics
+    Stats,
+    /// Clean up stale cache entries
+    Cleanup {
+        /// Maximum age of cache entries to keep (in hours)
+        #[arg(long, default_value = "168")]
+        max_age_hours: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -528,12 +547,45 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::ClearCache) => {
-            let task_cache = cuenv::task_cache::TaskCache::new()?;
-            match task_cache.clear() {
+            // Legacy command - redirect to new cache clear command
+            let cache_manager = cuenv::cache_manager::CacheManager::new()?;
+            match cache_manager.clear() {
                 Ok(()) => println!("✓ Task cache cleared"),
                 Err(e) => {
                     eprintln!("Failed to clear task cache: {e}");
                     return Err(e);
+                }
+            }
+        }
+        Some(Commands::Cache { command }) => {
+            let cache_manager = cuenv::cache_manager::CacheManager::new()?;
+
+            match command {
+                CacheCommands::Clear => match cache_manager.clear() {
+                    Ok(()) => println!("✓ Cache cleared successfully"),
+                    Err(e) => {
+                        eprintln!("Failed to clear cache: {e}");
+                        return Err(e);
+                    }
+                },
+                CacheCommands::Stats => {
+                    cache_manager.print_statistics();
+                }
+                CacheCommands::Cleanup { max_age_hours } => {
+                    use std::time::Duration;
+
+                    let max_age = Duration::from_secs(max_age_hours * 3600);
+                    match cache_manager.cleanup(max_age) {
+                        Ok((removed_count, bytes_freed)) => {
+                            println!("✓ Cache cleanup completed");
+                            println!("  Removed {} entries", removed_count);
+                            println!("  Freed {} bytes", bytes_freed);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to cleanup cache: {e}");
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }

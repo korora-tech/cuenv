@@ -7,7 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=libcue-bridge/bridge.go");
     println!("cargo:rerun-if-changed=libcue-bridge/bridge.h");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set by cargo"));
     let bridge_dir = PathBuf::from("libcue-bridge");
 
     // Create the bridge directory if it doesn't exist
@@ -22,10 +22,15 @@ fn main() {
         cmd.arg("-mod=vendor");
     }
 
+    let output_path = out_dir.join("libcue_bridge.a");
+    let output_str = output_path
+        .to_str()
+        .expect("Failed to convert output path to string");
+
     cmd.args([
         "-buildmode=c-archive", // Use static linking instead
         "-o",
-        out_dir.join("libcue_bridge.a").to_str().unwrap(),
+        output_str,
         "bridge.go",
     ]);
 
@@ -42,7 +47,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=cue_bridge");
 
     // Link system libraries that Go runtime needs
-    let target = env::var("TARGET").unwrap();
+    let target = env::var("TARGET").expect("TARGET not set by cargo");
 
     if target.contains("windows") {
         // Windows-specific libraries

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{RwLock, Semaphore};
 use url::Url;
 
 const DEFAULT_CACHE_SIZE: usize = 100;
@@ -34,7 +34,7 @@ impl CachedContent {
 pub struct HookManager<E: CommandExecutor + Send + Sync> {
     executor: Arc<E>,
     http_client: reqwest::Client,
-    cache: Arc<Mutex<LruCache<String, CachedContent>>>,
+    cache: Arc<RwLock<LruCache<String, CachedContent>>>,
     semaphore: Arc<Semaphore>,
     cache_ttl: Duration,
     rate_limiter: Option<Arc<RateLimitManager>>,
@@ -53,7 +53,7 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
 
         let cache_size =
             NonZeroUsize::new(DEFAULT_CACHE_SIZE).ok_or_else(|| anyhow!("Invalid cache size"))?;
-        let cache = Arc::new(Mutex::new(LruCache::new(cache_size)));
+        let cache = Arc::new(RwLock::new(LruCache::new(cache_size)));
 
         let semaphore = Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_HOOKS));
 
@@ -247,7 +247,7 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
         let cache_key = url.to_string();
 
         {
-            let mut cache = self.cache.lock().await;
+            let mut cache = self.cache.write().await;
             if let Some(cached) = cache.get(&cache_key) {
                 if !cached.is_expired(self.cache_ttl) {
                     log::debug!("Using cached content for URL: {url}");
@@ -278,7 +278,7 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
 
         // Update cache
         {
-            let mut cache = self.cache.lock().await;
+            let mut cache = self.cache.write().await;
             cache.put(
                 cache_key,
                 CachedContent {

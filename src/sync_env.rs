@@ -4,10 +4,11 @@ use once_cell::sync::Lazy;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
-/// Global mutex for thread-safe environment variable access
-static ENV_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+/// Global RwLock for thread-safe environment variable access
+/// Using RwLock since reads are much more common than writes
+static ENV_LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
 
 /// Get the lock file path for cuenv instances
 fn get_lock_file_path() -> PathBuf {
@@ -30,10 +31,10 @@ pub struct SyncEnv;
 impl SyncEnv {
     /// Set an environment variable with thread safety
     pub fn set_var<K: AsRef<str>, V: AsRef<str>>(key: K, value: V) -> Result<()> {
-        let _guard = ENV_MUTEX.lock().map_err(|e| {
+        let _guard = ENV_LOCK.write().map_err(|e| {
             Error::environment(
-                "ENV_MUTEX",
-                format!("Failed to acquire environment lock: {}", e),
+                "ENV_LOCK",
+                format!("Failed to acquire environment write lock: {}", e),
             )
         })?;
 
@@ -43,10 +44,10 @@ impl SyncEnv {
 
     /// Get an environment variable with thread safety
     pub fn var<K: AsRef<str>>(key: K) -> Result<Option<String>> {
-        let _guard = ENV_MUTEX.lock().map_err(|e| {
+        let _guard = ENV_LOCK.read().map_err(|e| {
             Error::environment(
-                "ENV_MUTEX",
-                format!("Failed to acquire environment lock: {}", e),
+                "ENV_LOCK",
+                format!("Failed to acquire environment read lock: {}", e),
             )
         })?;
 
@@ -55,10 +56,10 @@ impl SyncEnv {
 
     /// Remove an environment variable with thread safety
     pub fn remove_var<K: AsRef<str>>(key: K) -> Result<()> {
-        let _guard = ENV_MUTEX.lock().map_err(|e| {
+        let _guard = ENV_LOCK.write().map_err(|e| {
             Error::environment(
-                "ENV_MUTEX",
-                format!("Failed to acquire environment lock: {}", e),
+                "ENV_LOCK",
+                format!("Failed to acquire environment write lock: {}", e),
             )
         })?;
 
@@ -68,10 +69,10 @@ impl SyncEnv {
 
     /// Get all environment variables with thread safety
     pub fn vars() -> Result<Vec<(String, String)>> {
-        let _guard = ENV_MUTEX.lock().map_err(|e| {
+        let _guard = ENV_LOCK.read().map_err(|e| {
             Error::environment(
-                "ENV_MUTEX",
-                format!("Failed to acquire environment lock: {}", e),
+                "ENV_LOCK",
+                format!("Failed to acquire environment read lock: {}", e),
             )
         })?;
 
@@ -137,31 +138,33 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn test_thread_safe_env_operations() {
+    fn test_thread_safe_env_operations() -> Result<()> {
         let key = format!("TEST_SYNC_ENV_{}", uuid::Uuid::new_v4());
 
         // Test setting and getting
-        SyncEnv::set_var(&key, "value1").unwrap();
-        assert_eq!(SyncEnv::var(&key).unwrap(), Some("value1".to_string()));
+        SyncEnv::set_var(&key, "value1")?;
+        assert_eq!(SyncEnv::var(&key)?, Some("value1".to_string()));
 
         // Test concurrent access
         let key_clone = key.clone();
         let handle = thread::spawn(move || {
-            SyncEnv::set_var(&key_clone, "value2").unwrap();
+            SyncEnv::set_var(&key_clone, "value2").expect("Failed to set env var in thread");
         });
 
-        handle.join().unwrap();
-        assert_eq!(SyncEnv::var(&key).unwrap(), Some("value2".to_string()));
+        handle.join().expect("Thread panicked");
+        assert_eq!(SyncEnv::var(&key)?, Some("value2".to_string()));
 
         // Cleanup
-        SyncEnv::remove_var(&key).unwrap();
-        assert_eq!(SyncEnv::var(&key).unwrap(), None);
+        SyncEnv::remove_var(&key)?;
+        assert_eq!(SyncEnv::var(&key)?, None);
+
+        Ok(())
     }
 
     #[test]
-    fn test_instance_lock() {
+    fn test_instance_lock() -> Result<()> {
         // First lock should succeed
-        let lock1 = InstanceLock::try_acquire().unwrap();
+        let lock1 = InstanceLock::try_acquire()?;
 
         // Second lock should fail
         assert!(InstanceLock::try_acquire().is_err());
@@ -170,11 +173,13 @@ mod tests {
         drop(lock1);
 
         // Now second lock should succeed
-        let _lock2 = InstanceLock::try_acquire().unwrap();
+        let _lock2 = InstanceLock::try_acquire()?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_concurrent_env_modifications() {
+    fn test_concurrent_env_modifications() -> Result<()> {
         let base_key = format!("TEST_CONCURRENT_{}", uuid::Uuid::new_v4());
         let num_threads = 10;
         let iterations = 100;
@@ -185,10 +190,12 @@ mod tests {
                 thread::spawn(move || {
                     for j in 0..iterations {
                         let value = format!("thread_{}_iter_{}", i, j);
-                        SyncEnv::set_var(&key, &value).unwrap();
+                        SyncEnv::set_var(&key, &value)
+                            .expect("Failed to set env var in stress test");
 
                         // Verify the value was set correctly
-                        let retrieved = SyncEnv::var(&key).unwrap();
+                        let retrieved =
+                            SyncEnv::var(&key).expect("Failed to get env var in stress test");
                         assert_eq!(retrieved, Some(value));
 
                         // Small delay to increase chance of race conditions
@@ -196,20 +203,22 @@ mod tests {
                     }
 
                     // Cleanup
-                    SyncEnv::remove_var(&key).unwrap();
+                    SyncEnv::remove_var(&key).expect("Failed to remove env var in stress test");
                 })
             })
             .collect();
 
         // Wait for all threads to complete
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("Thread panicked in stress test");
         }
 
         // Verify all variables were cleaned up
         for i in 0..num_threads {
             let key = format!("{}_{}", base_key, i);
-            assert_eq!(SyncEnv::var(&key).unwrap(), None);
+            assert_eq!(SyncEnv::var(&key)?, None);
         }
+
+        Ok(())
     }
 }

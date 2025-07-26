@@ -1,10 +1,10 @@
+use crate::atomic_file::write_atomic_string;
 use crate::cache::{get_cache_mode, CacheItem, CacheMode, HashEngine};
 use crate::errors::{Error, Result};
 use crate::xdg::XdgPaths;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::time::Duration;
 
 /// Main cache engine for cuenv
@@ -16,11 +16,8 @@ pub struct CacheEngine {
     /// Hash engine for content-based caching
     pub hash: HashEngine,
 
-    /// Current cache mode
+    /// Current cache mode (immutable once set)
     mode: CacheMode,
-
-    /// Forced mode override
-    forced_mode: RwLock<Option<CacheMode>>,
 }
 
 impl CacheEngine {
@@ -41,8 +38,7 @@ impl CacheEngine {
 # This file is a cache directory tag created by cuenv.
 # For information see https://bford.info/cachedir"#;
 
-            fs::write(&cache_tag, tag_content)
-                .map_err(|e| Error::file_system(cache_tag, "write cache directory tag", e))?;
+            write_atomic_string(&cache_tag, tag_content)?;
         }
 
         let hash = HashEngine::new(&cache_dir)?;
@@ -51,14 +47,40 @@ impl CacheEngine {
             cache_dir,
             hash,
             mode: get_cache_mode(),
-            forced_mode: RwLock::new(None),
         })
     }
 
-    /// Force a specific cache mode
-    pub fn force_mode(&self, mode: CacheMode) {
-        let _ = self.forced_mode.write().unwrap().insert(mode);
-        std::env::set_var("CUENV_CACHE", mode.to_string());
+    /// Create a new cache engine with a specific mode
+    pub fn with_mode(mode: CacheMode) -> Result<CacheEngine> {
+        let cache_dir = XdgPaths::cache_dir();
+
+        log::debug!(
+            "Creating cache engine with cache_dir: {:?}, mode: {:?}",
+            cache_dir,
+            mode
+        );
+
+        // Create cache directory if it doesn't exist
+        fs::create_dir_all(&cache_dir)
+            .map_err(|e| Error::file_system(cache_dir.clone(), "create cache directory", e))?;
+
+        // Create cache directory tag for tools that understand them
+        let cache_tag = cache_dir.join("CACHEDIR.TAG");
+        if !cache_tag.exists() {
+            let tag_content = r#"Signature: 8a477f597d28d172789f06886806bc55
+# This file is a cache directory tag created by cuenv.
+# For information see https://bford.info/cachedir"#;
+
+            write_atomic_string(&cache_tag, tag_content)?;
+        }
+
+        let hash = HashEngine::new(&cache_dir)?;
+
+        Ok(CacheEngine {
+            cache_dir,
+            hash,
+            mode,
+        })
     }
 
     /// Create a cache item for the given path
@@ -138,31 +160,26 @@ impl CacheEngine {
 
     /// Check if cache is readable
     pub fn is_readable(&self) -> bool {
-        self.get_mode().is_readable()
+        self.mode.is_readable()
     }
 
     /// Check if cache is read-only
     pub fn is_read_only(&self) -> bool {
-        self.get_mode().is_read_only()
+        self.mode.is_read_only()
     }
 
     /// Check if cache is writable
     pub fn is_writable(&self) -> bool {
-        self.get_mode().is_writable()
+        self.mode.is_writable()
     }
 
     /// Check if cache is write-only
     pub fn is_write_only(&self) -> bool {
-        self.get_mode().is_write_only()
+        self.mode.is_write_only()
     }
 
     /// Get the current cache mode
-    fn get_mode(&self) -> CacheMode {
-        if let Ok(lock) = self.forced_mode.read() {
-            if let Some(mode) = &*lock {
-                return *mode;
-            }
-        }
+    pub fn mode(&self) -> CacheMode {
         self.mode
     }
 

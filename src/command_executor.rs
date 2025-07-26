@@ -1,5 +1,6 @@
 use crate::audit::{audit_logger, AuditLogger};
 use crate::errors::{Error, Result};
+use crate::retry::convenience::retry_command;
 use crate::security::SecurityValidator;
 use crate::types::{CommandArguments, EnvironmentVariables};
 use async_trait::async_trait;
@@ -89,7 +90,7 @@ impl SystemCommandExecutor {
             Ok(output) => Ok(output),
             Err(e) => Err(Error::command_execution(
                 cmd,
-                args.clone().into_inner(),
+                args.as_slice().to_vec(),
                 format!("failed to execute command: {e}"),
                 None,
             )),
@@ -133,7 +134,7 @@ impl SystemCommandExecutor {
             Ok(output) => Ok(output),
             Err(e) => Err(Error::command_execution(
                 cmd,
-                args.clone().into_inner(),
+                args.as_slice().to_vec(),
                 format!("failed to execute command with environment: {e}"),
                 None,
             )),
@@ -164,10 +165,17 @@ impl CommandExecutor for SystemCommandExecutor {
         env: EnvironmentVariables,
     ) -> Result<Output> {
         if self.enable_retry {
-            let env_clone = env.clone();
-            retry_command(|| async move { 
-                self.execute_with_env_once(cmd, args, env_clone.clone()).await 
-            }).await
+            // Create an Arc to share the env across retry attempts without cloning
+            let env_arc = Arc::new(env);
+            retry_command(|| {
+                let env_ref = Arc::clone(&env_arc);
+                async move {
+                    // Clone only when actually needed for the execution
+                    self.execute_with_env_once(cmd, args, (*env_ref).clone())
+                        .await
+                }
+            })
+            .await
         } else {
             self.execute_with_env_once(cmd, args, env).await
         }
@@ -193,14 +201,20 @@ pub struct TestResponse {
 impl TestCommandExecutor {
     pub fn new() -> Self {
         Self {
-            responses: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            responses: std::sync::Arc::new(std::sync::Mutex::new(HashMap::with_capacity(10))),
         }
     }
 
     pub fn add_response(&self, cmd: &str, args: &[String], response: TestResponse) {
         let key = format!("{} {}", cmd, args.join(" "));
-        let mut responses = self.responses.lock().unwrap();
-        responses.insert(key, response);
+        match self.responses.lock() {
+            Ok(mut responses) => {
+                responses.insert(key, response);
+            }
+            Err(e) => {
+                eprintln!("Failed to lock test responses: {}", e);
+            }
+        }
     }
 
     pub fn add_simple_response(&self, cmd: &str, args: &[String], stdout: &str) {
@@ -233,13 +247,16 @@ impl TestCommandExecutor {
 impl CommandExecutor for TestCommandExecutor {
     async fn execute(&self, cmd: &str, args: &CommandArguments) -> Result<Output> {
         let key = format!("{} {}", cmd, args.as_slice().join(" "));
-        let responses = self.responses.lock().unwrap();
+        let responses = self
+            .responses
+            .lock()
+            .map_err(|e| Error::configuration(format!("Failed to lock test responses: {}", e)))?;
 
         match responses.get(&key) {
             Some(response) => Ok(Output {
                 status: exit_status::from_raw(response.status_code),
-                stdout: response.stdout.clone(),
-                stderr: response.stderr.clone(),
+                stdout: response.stdout.to_vec(),
+                stderr: response.stderr.to_vec(),
             }),
             None => Err(Error::configuration(format!(
                 "no test response configured for command: {}",
@@ -294,7 +311,10 @@ mod tests {
         executor.add_simple_response("echo", &["hello".to_string()], "hello\n");
 
         let args = CommandArguments::from_vec(vec!["hello".to_string()]);
-        let output = executor.execute("echo", &args).await.unwrap();
+        let output = executor
+            .execute("echo", &args)
+            .await
+            .expect("Failed to execute echo command");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
         assert!(output.status.success());
     }
@@ -305,7 +325,10 @@ mod tests {
         executor.add_error_response("false", &[], "command failed");
 
         let args = CommandArguments::new();
-        let output = executor.execute("false", &args).await.unwrap();
+        let output = executor
+            .execute("false", &args)
+            .await
+            .expect("Failed to execute false command");
         assert_eq!(String::from_utf8_lossy(&output.stderr), "command failed");
         assert!(!output.status.success());
     }
@@ -317,10 +340,8 @@ mod tests {
         let args = CommandArguments::from_vec(vec!["cmd".to_string()]);
         let result = executor.execute("unknown", &args).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("no test response configured"));
+        let err = result.expect_err("Expected error for unknown command");
+        assert!(err.to_string().contains("no test response configured"));
     }
 }
 

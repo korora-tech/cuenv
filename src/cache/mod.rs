@@ -1,17 +1,29 @@
-//! Moon-style caching system for cuenv tasks
+//! High-performance caching system for cuenv tasks
 //!
-//! This module provides a robust, battle-tested caching infrastructure
-//! inspired by the moon build tool's cache system.
+//! This module provides a robust caching infrastructure with
+//! content-addressed storage and concurrent access support.
 
-mod cache_engine;
-mod cache_item;
-mod cache_mode;
+mod engine;
 mod hash_engine;
+mod item;
+mod mode;
 
-pub use cache_engine::*;
-pub use cache_item::*;
-pub use cache_mode::*;
-pub use hash_engine::*;
+// Advanced caching modules
+mod action_cache;
+mod concurrent_cache;
+mod content_addressed_store;
+mod types;
+
+pub use engine::CacheEngine;
+pub use hash_engine::{expand_glob_pattern, HashEngine};
+pub use item::CacheItem;
+pub use mode::{get_cache_mode, CacheMode};
+
+// Export advanced caching components
+pub use action_cache::{ActionCache, ActionDigest, ActionResult};
+pub use concurrent_cache::{ConcurrentCache, ConcurrentCacheBuilder};
+pub use content_addressed_store::{ContentAddressedStore, ObjectMetadata};
+pub use types::CachedTaskResult;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

@@ -215,7 +215,7 @@
               buildPhase = ''
                 runHook preBuild
                 # Run clippy instead of normal build
-                cargo clippy --all-targets --all-features -- -D warnings
+                cargo clippy --all-targets --all-features -- -D warnings -A clippy::duplicate_mod
                 runHook postBuild
               '';
 

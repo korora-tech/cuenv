@@ -1,8 +1,10 @@
 pub mod access_restrictions;
 pub mod access_restrictions_builder;
 pub mod async_runtime;
+pub mod atomic_file;
 pub mod audit;
 pub mod cache;
+pub mod cache_manager;
 pub mod cleanup;
 pub mod command_executor;
 pub mod constants;
@@ -28,7 +30,6 @@ pub mod shell;
 pub mod shell_hook;
 pub mod state;
 pub mod sync_env;
-pub mod task_cache;
 pub mod task_executor;
 pub mod types;
 pub mod xdg;

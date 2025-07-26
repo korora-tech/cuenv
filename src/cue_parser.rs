@@ -136,6 +136,7 @@ pub struct SecurityConfig {
     /// Automatically infer disk restrictions from task inputs/outputs
     #[serde(rename = "inferFromInputsOutputs")]
     pub infer_from_inputs_outputs: Option<bool>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -196,6 +197,108 @@ pub struct ParseResult {
     pub hooks: HashMap<String, HookConfig>,
 }
 
+// Input validation functions
+fn validate_package_name(package_name: &str) -> Result<()> {
+    if package_name.is_empty() {
+        return Err(Error::configuration(
+            "Package name cannot be empty".to_string(),
+        ));
+    }
+
+    // Only allow loading the "env" package
+    if package_name != ENV_PACKAGE_NAME {
+        return Err(Error::configuration(format!(
+            "Only 'env' package is supported, got '{package_name}'. Please ensure your .cue files use 'package env'"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_directory_path(dir: &Path) -> Result<String> {
+    let dir_str = dir.to_string_lossy();
+    if dir_str.is_empty() {
+        return Err(Error::configuration(
+            "Directory path cannot be empty".to_string(),
+        ));
+    }
+    Ok(dir_str.to_string())
+}
+
+// FFI string management utilities
+fn create_ffi_string(value: &str, context: &str) -> Result<CString> {
+    CString::new(value).map_err(|e| {
+        Error::ffi(
+            "cue_eval_package",
+            format!("{} - contains null byte: {}", context, e),
+        )
+    })
+}
+
+fn call_cue_eval_package(dir_path: &CStr, package_name: &CStr) -> *mut c_char {
+    // Safety: cue_eval_package is an external C function that:
+    // - Takes two non-null C string pointers as arguments
+    // - Returns a heap-allocated C string that must be freed with cue_free_string
+    // - Returns null on allocation failure
+    // We ensure the input pointers are valid for the duration of the call
+    unsafe { cue_eval_package(dir_path.as_ptr(), package_name.as_ptr()) }
+}
+
+// JSON parsing utilities
+fn parse_json_response(json_str: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(json_str).map_err(|e| {
+        let error = Error::Json {
+            message: "failed to parse JSON result from CUE parser".to_string(),
+            source: e,
+        };
+        log::error!("CUE parser returned invalid JSON: {}", json_str);
+        log::error!("Recovery suggestion: {}", suggest_recovery(&error));
+        error
+    })
+}
+
+fn check_for_error_response(json_value: &serde_json::Value, dir: &Path) -> Result<()> {
+    if let serde_json::Value::Object(ref map) = json_value {
+        if let Some(serde_json::Value::String(error)) = map.get("error") {
+            let cue_error = Error::cue_parse(dir, error.clone());
+
+            // Provide specific recovery suggestions based on error content
+            let recovery_hint = get_recovery_hint(error);
+
+            log::error!("CUE parsing error: {}", error);
+            log::error!("Recovery suggestion: {}", recovery_hint);
+            return Err(cue_error);
+        }
+    }
+    Ok(())
+}
+
+fn get_recovery_hint(error: &str) -> &'static str {
+    if error.contains("cannot find package") {
+        "Ensure your .cue files have 'package env' at the top"
+    } else if error.contains("expected") || error.contains("syntax") {
+        "Check for missing commas, brackets, or quotes in your CUE file"
+    } else if error.contains("cycle") {
+        "You have a circular dependency in your CUE definitions"
+    } else if error.contains("incomplete") {
+        "Some required fields are missing in your CUE configuration"
+    } else {
+        "Run 'cue vet' on your files to check for syntax errors"
+    }
+}
+
+fn deserialize_cue_result(json_value: serde_json::Value) -> Result<CueParseResult> {
+    serde_json::from_value(json_value).map_err(|e| {
+        let error = Error::Json {
+            message: "failed to parse CUE result structure".to_string(),
+            source: e,
+        };
+        log::error!("Failed to deserialize CUE result. This might indicate a version mismatch.");
+        log::error!("Recovery suggestion: {}", suggest_recovery(&error));
+        error
+    })
+}
+
 impl CueParser {
     pub fn eval_package(dir: &Path, package_name: &str) -> Result<HashMap<String, String>> {
         match Self::eval_package_with_options(dir, package_name, &ParseOptions::default()) {
@@ -209,49 +312,16 @@ impl CueParser {
         package_name: &str,
         options: &ParseOptions,
     ) -> Result<ParseResult> {
-        // Validate inputs before FFI calls
-        if package_name.is_empty() {
-            return Err(Error::configuration(
-                "Package name cannot be empty".to_string(),
-            ));
-        }
+        // Validate inputs
+        validate_package_name(package_name)?;
+        let dir_str = validate_directory_path(dir)?;
 
-        // Only allow loading the "env" package
-        if package_name != ENV_PACKAGE_NAME {
-            return Err(Error::configuration(format!(
-                "Only 'env' package is supported, got '{package_name}'. Please ensure your .cue files use 'package env'"
-            )));
-        }
+        // Create FFI strings
+        let c_dir = create_ffi_string(&dir_str, "invalid directory path")?;
+        let c_package = create_ffi_string(package_name, "invalid package name")?;
 
-        // Validate directory path
-        let dir_str = dir.to_string_lossy();
-        if dir_str.is_empty() {
-            return Err(Error::configuration(
-                "Directory path cannot be empty".to_string(),
-            ));
-        }
-
-        // Create C strings for FFI
-        let c_dir = CString::new(dir_str.as_ref()).map_err(|e| {
-            Error::ffi(
-                "cue_eval_package",
-                format!("invalid directory path - contains null byte: {}", e),
-            )
-        })?;
-
-        let c_package = CString::new(package_name).map_err(|e| {
-            Error::ffi(
-                "cue_eval_package",
-                format!("invalid package name - contains null byte: {}", e),
-            )
-        })?;
-
-        // Safety: cue_eval_package is an external C function that:
-        // - Takes two non-null C string pointers as arguments
-        // - Returns a heap-allocated C string that must be freed with cue_free_string
-        // - Returns null on allocation failure
-        // We ensure the input pointers are valid for the duration of the call
-        let result_ptr = unsafe { cue_eval_package(c_dir.as_ptr(), c_package.as_ptr()) };
+        // Call CUE evaluation
+        let result_ptr = call_cue_eval_package(&c_dir, &c_package);
 
         // Wrap the result pointer for automatic cleanup
         // Safety: result_ptr is either null or a valid pointer returned from cue_eval_package
@@ -265,61 +335,14 @@ impl CueParser {
         let result_str = unsafe { result_wrapper.to_str()? };
 
         let parse_result = if result_str.is_empty() {
-            ParseResult {
-                variables: HashMap::new(),
-                commands: HashMap::new(),
-                tasks: HashMap::new(),
-                hooks: HashMap::new(),
-            }
+            ParseResult::default()
         } else {
-            // Parse JSON result
-            let json_value: serde_json::Value = serde_json::from_str(result_str).map_err(|e| {
-                let error = Error::Json {
-                    message: "failed to parse JSON result from CUE parser".to_string(),
-                    source: e,
-                };
-                log::error!("CUE parser returned invalid JSON: {}", result_str);
-                log::error!("Recovery suggestion: {}", suggest_recovery(&error));
-                error
-            })?;
+            // Parse and validate JSON response
+            let json_value = parse_json_response(result_str)?;
+            check_for_error_response(&json_value, dir)?;
 
-            // Check if it's an error response
-            if let serde_json::Value::Object(ref map) = json_value {
-                if let Some(serde_json::Value::String(error)) = map.get("error") {
-                    let cue_error = Error::cue_parse(dir, error.clone());
-
-                    // Provide specific recovery suggestions based on error content
-                    let recovery_hint = if error.contains("cannot find package") {
-                        "Ensure your .cue files have 'package env' at the top"
-                    } else if error.contains("expected") || error.contains("syntax") {
-                        "Check for missing commas, brackets, or quotes in your CUE file"
-                    } else if error.contains("cycle") {
-                        "You have a circular dependency in your CUE definitions"
-                    } else if error.contains("incomplete") {
-                        "Some required fields are missing in your CUE configuration"
-                    } else {
-                        "Run 'cue vet' on your files to check for syntax errors"
-                    };
-
-                    log::error!("CUE parsing error: {}", error);
-                    log::error!("Recovery suggestion: {}", recovery_hint);
-                    return Err(cue_error);
-                }
-            }
-
-            // Deserialize into structured result
-            let cue_result: CueParseResult = serde_json::from_value(json_value).map_err(|e| {
-                let error = Error::Json {
-                    message: "failed to parse CUE result structure".to_string(),
-                    source: e,
-                };
-                log::error!(
-                    "Failed to deserialize CUE result. This might indicate a version mismatch."
-                );
-                log::error!("Recovery suggestion: {}", suggest_recovery(&error));
-                error
-            })?;
-
+            // Deserialize and build final result
+            let cue_result = deserialize_cue_result(json_value)?;
             Self::build_parse_result(cue_result, options)?
         };
 
@@ -328,79 +351,16 @@ impl CueParser {
     }
 
     fn build_parse_result(
-        cue_result: CueParseResult,
+        mut cue_result: CueParseResult,
         options: &ParseOptions,
     ) -> Result<ParseResult> {
-        let mut final_vars = HashMap::new();
-
-        // Start with base variables
-        for (key, val) in &cue_result.variables {
-            // Check capability filter
-            let should_include = if let Some(metadata) = cue_result.metadata.get(key) {
-                if let Some(cap) = &metadata.capability {
-                    // Variable has a capability tag, only include if it matches the filter
-                    options.capabilities.is_empty() || options.capabilities.contains(cap)
-                } else {
-                    // No capability tag means always include
-                    true
-                }
-            } else {
-                // No metadata means no capability tag, always include
-                true
-            };
-
-            if should_include {
-                if let Some(str_val) = Self::value_to_string(val) {
-                    final_vars.insert(key.clone(), str_val);
-                }
-            }
-        }
-
-        // Apply environment-specific overrides
-        if let Some(env_name) = &options.environment {
-            if let Some(env_vars) = cue_result.environments.get(env_name) {
-                for (key, val) in env_vars {
-                    // For environment overrides, we still need to check capabilities
-                    // if they were specified in the base variable
-                    let should_include = if let Some(metadata) = cue_result.metadata.get(key) {
-                        if let Some(cap) = &metadata.capability {
-                            // Variable has a capability tag, only include if it matches the filter
-                            options.capabilities.is_empty() || options.capabilities.contains(cap)
-                        } else {
-                            // No capability tag means always include
-                            true
-                        }
-                    } else {
-                        // No metadata means no capability tag, always include
-                        true
-                    };
-
-                    if should_include {
-                        if let Some(str_val) = Self::value_to_string(val) {
-                            final_vars.insert(key.clone(), str_val);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Process hooks
-        let mut hooks = HashMap::new();
-        if let Some(hooks_config) = cue_result.hooks {
-            if let Some(mut on_enter) = hooks_config.on_enter {
-                on_enter.hook_type = HookType::OnEnter;
-                hooks.insert("onEnter".to_string(), on_enter);
-            }
-            if let Some(mut on_exit) = hooks_config.on_exit {
-                on_exit.hook_type = HookType::OnExit;
-                hooks.insert("onExit".to_string(), on_exit);
-            }
-        }
+        let final_vars = build_filtered_variables(&cue_result, options);
+        let hooks = extract_hooks(cue_result.hooks);
 
         Ok(ParseResult {
             variables: final_vars,
-            commands: cue_result.commands,
-            tasks: cue_result.tasks,
+            commands: std::mem::take(&mut cue_result.commands),
+            tasks: std::mem::take(&mut cue_result.tasks),
             hooks,
         })
     }
@@ -419,8 +379,188 @@ impl CueParser {
     }
 }
 
+// Capability filtering logic
+fn should_include_variable(
+    key: &str,
+    metadata: &HashMap<String, VariableMetadata>,
+    capabilities: &[String],
+) -> bool {
+    if let Some(var_metadata) = metadata.get(key) {
+        if let Some(cap) = &var_metadata.capability {
+            // Variable has a capability tag, only include if it matches the filter
+            capabilities.is_empty() || capabilities.contains(cap)
+        } else {
+            // No capability tag means always include
+            true
+        }
+    } else {
+        // No metadata means no capability tag, always include
+        true
+    }
+}
+
+// Variable processing functions
+fn process_variables(
+    variables: &HashMap<String, serde_json::Value>,
+    metadata: &HashMap<String, VariableMetadata>,
+    capabilities: &[String],
+) -> HashMap<String, String> {
+    let mut result = HashMap::with_capacity(variables.len());
+
+    for (key, val) in variables {
+        if should_include_variable(key, metadata, capabilities) {
+            if let Some(str_val) = CueParser::value_to_string(val) {
+                result.insert(key.clone(), str_val);
+            }
+        }
+    }
+
+    result
+}
+
+fn build_filtered_variables(
+    cue_result: &CueParseResult,
+    options: &ParseOptions,
+) -> HashMap<String, String> {
+    // Start with base variables
+    let mut final_vars = process_variables(
+        &cue_result.variables,
+        &cue_result.metadata,
+        &options.capabilities,
+    );
+
+    // Apply environment-specific overrides
+    if let Some(env_name) = &options.environment {
+        if let Some(env_vars) = cue_result.environments.get(env_name) {
+            let env_overrides =
+                process_variables(env_vars, &cue_result.metadata, &options.capabilities);
+
+            // Merge environment overrides into base variables
+            final_vars.extend(env_overrides);
+        }
+    }
+
+    final_vars
+}
+
+// Hook processing functions
+fn extract_hooks(hooks_config: Option<HooksConfig>) -> HashMap<String, HookConfig> {
+    let mut hooks = HashMap::with_capacity(2); // At most 2 hooks (onEnter, onExit)
+
+    if let Some(config) = hooks_config {
+        if let Some(mut on_enter) = config.on_enter {
+            on_enter.hook_type = HookType::OnEnter;
+            hooks.insert("onEnter".to_string(), on_enter);
+        }
+        if let Some(mut on_exit) = config.on_exit {
+            on_exit.hook_type = HookType::OnExit;
+            hooks.insert("onExit".to_string(), on_exit);
+        }
+    }
+
+    hooks
+}
+
 #[cfg(test)]
 mod tests {
+    // Tests for pure functions
+    #[test]
+    fn test_validate_package_name() {
+        use super::validate_package_name;
+
+        // Empty package name should fail
+        assert!(validate_package_name("").is_err());
+
+        // Non-env package should fail
+        assert!(validate_package_name("mypackage").is_err());
+
+        // Only "env" package should succeed
+        assert!(validate_package_name("env").is_ok());
+    }
+
+    #[test]
+    fn test_validate_directory_path() {
+        use super::validate_directory_path;
+        use std::path::Path;
+
+        // Empty path should fail
+        assert!(validate_directory_path(Path::new("")).is_err());
+
+        // Valid path should succeed
+        let result = validate_directory_path(Path::new("/tmp/test"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/tmp/test");
+    }
+
+    #[test]
+    fn test_should_include_variable() {
+        use super::{should_include_variable, VariableMetadata};
+        use std::collections::HashMap;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "AWS_KEY".to_string(),
+            VariableMetadata {
+                capability: Some("aws".to_string()),
+            },
+        );
+        metadata.insert("DB_URL".to_string(), VariableMetadata { capability: None });
+
+        // Variable with no metadata should always be included
+        assert!(should_include_variable("UNKNOWN", &metadata, &[]));
+        assert!(should_include_variable(
+            "UNKNOWN",
+            &metadata,
+            &["aws".to_string()]
+        ));
+
+        // Variable with no capability should always be included
+        assert!(should_include_variable("DB_URL", &metadata, &[]));
+        assert!(should_include_variable(
+            "DB_URL",
+            &metadata,
+            &["aws".to_string()]
+        ));
+
+        // Variable with capability should respect filter
+        assert!(should_include_variable("AWS_KEY", &metadata, &[])); // Empty filter includes all
+        assert!(should_include_variable(
+            "AWS_KEY",
+            &metadata,
+            &["aws".to_string()]
+        )); // Matching capability
+        assert!(!should_include_variable(
+            "AWS_KEY",
+            &metadata,
+            &["gcp".to_string()]
+        )); // Non-matching capability
+    }
+
+    #[test]
+    fn test_get_recovery_hint() {
+        use super::get_recovery_hint;
+
+        assert_eq!(
+            get_recovery_hint("cannot find package"),
+            "Ensure your .cue files have 'package env' at the top"
+        );
+        assert_eq!(
+            get_recovery_hint("expected token"),
+            "Check for missing commas, brackets, or quotes in your CUE file"
+        );
+        assert_eq!(
+            get_recovery_hint("cycle detected"),
+            "You have a circular dependency in your CUE definitions"
+        );
+        assert_eq!(
+            get_recovery_hint("incomplete value"),
+            "Some required fields are missing in your CUE configuration"
+        );
+        assert_eq!(
+            get_recovery_hint("unknown error"),
+            "Run 'cue vet' on your files to check for syntax errors"
+        );
+    }
     use super::*;
     use std::fs;
     use tempfile::TempDir;

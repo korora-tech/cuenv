@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::access_restrictions::AccessRestrictions;
 use crate::command_executor::CommandExecutor;
@@ -37,11 +37,12 @@ pub struct EnvManager {
 impl EnvManager {
     pub fn new() -> Self {
         Self {
-            original_env: HashMap::new(),
-            cue_vars: HashMap::new(),
-            commands: HashMap::new(),
-            tasks: HashMap::new(),
-            hooks: HashMap::new(),
+            // Pre-allocate with reasonable initial capacities to reduce rehashing
+            original_env: HashMap::with_capacity(100), // Environment typically has many vars
+            cue_vars: HashMap::with_capacity(50),      // CUE vars are usually fewer
+            commands: HashMap::with_capacity(20),      // Commands are limited
+            tasks: HashMap::with_capacity(20),         // Tasks are also limited
+            hooks: HashMap::with_capacity(4),          // Usually only a few hooks
         }
     }
 }
@@ -410,7 +411,7 @@ impl EnvManager {
         for secret in secret_values.iter() {
             secret_set.insert(secret.to_string());
         }
-        let secrets = Arc::new(Mutex::new(secret_set));
+        let secrets = Arc::new(RwLock::new(secret_set));
 
         // Create and execute the command with only the CUE environment
         let mut cmd = Command::new(command);
@@ -608,7 +609,7 @@ impl EnvManager {
         for secret in secret_values.iter() {
             secret_set.insert(secret.to_string());
         }
-        let secrets = Arc::new(Mutex::new(secret_set));
+        let secrets = Arc::new(RwLock::new(secret_set));
 
         // Create and execute the command with only the CUE environment
         let mut cmd = Command::new(command);
@@ -856,7 +857,7 @@ impl EnvManager {
             })?
             .into_iter()
             .collect();
-        let mut cue_env_vars = HashMap::new();
+        let mut cue_env_vars = HashMap::with_capacity(self.cue_vars.len());
 
         // Collect variables that were added or modified by CUE
         for (key, value) in &current_env {
@@ -1051,8 +1052,8 @@ env: {
         assert_eq!(status, 0, "PATH and HOME should be preserved");
     }
 
-    #[test]
-    fn test_run_command_with_restrictions() {
+    #[tokio::test]
+    async fn test_run_command_with_restrictions() {
         let temp_dir = TempDir::new().unwrap();
         let env_file = temp_dir.path().join("env.cue");
         fs::write(
@@ -1066,7 +1067,7 @@ env: {
         .unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load_env(temp_dir.path()).unwrap();
+        manager.load_env(temp_dir.path()).await.unwrap();
 
         // Test without restrictions (should work)
         let restrictions = AccessRestrictions::default();

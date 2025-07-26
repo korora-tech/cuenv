@@ -1,3 +1,4 @@
+use crate::atomic_file::write_atomic_string;
 use crate::cache::{get_cache_mode, resolve_cache_path};
 use crate::errors::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -23,18 +24,22 @@ where
         let mut data = T::default();
 
         if get_cache_mode().is_readable() {
-            if full_path.exists() {
-                log::debug!("Cache hit, reading item from {:?}", full_path);
+            // Directly attempt to read without checking existence first (avoiding TOCTOU)
+            match fs::read_to_string(&full_path) {
+                Ok(content) => {
+                    log::debug!("Cache hit, reading item from {:?}", full_path);
 
-                let content = fs::read_to_string(&full_path)
-                    .map_err(|e| Error::file_system(full_path.clone(), "read cache item", e))?;
-
-                data = serde_json::from_str(&content).map_err(|e| Error::Json {
-                    message: "Failed to parse cached item".to_string(),
-                    source: e,
-                })?;
-            } else {
-                log::debug!("Cache miss, item does not exist at {:?}", full_path);
+                    data = serde_json::from_str(&content).map_err(|e| Error::Json {
+                        message: "Failed to parse cached item".to_string(),
+                        source: e,
+                    })?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    log::debug!("Cache miss, item does not exist at {:?}", full_path);
+                }
+                Err(e) => {
+                    return Err(Error::file_system(full_path.clone(), "read cache item", e));
+                }
             }
         } else {
             log::trace!("Cache is not readable, skipping checks for {:?}", full_path);
@@ -51,20 +56,13 @@ where
         if get_cache_mode().is_writable() {
             log::debug!("Writing cache item to {:?}", self.path);
 
-            // Ensure parent directory exists
-            if let Some(parent) = self.path.parent() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    Error::file_system(parent.to_path_buf(), "create cache directory", e)
-                })?;
-            }
-
             let content = serde_json::to_string_pretty(&self.data).map_err(|e| Error::Json {
                 message: "Failed to serialize cache item".to_string(),
                 source: e,
             })?;
 
-            fs::write(&self.path, content)
-                .map_err(|e| Error::file_system(self.path.clone(), "write cache item", e))?;
+            // Use atomic write to prevent corruption
+            write_atomic_string(&self.path, &content)?;
         } else {
             log::trace!("Cache is not writable, skipping save for {:?}", self.path);
         }

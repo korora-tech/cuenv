@@ -30,7 +30,7 @@ struct CleanupResource {
 impl CleanupRegistry {
     fn new() -> Self {
         Self {
-            resources: HashMap::new(),
+            resources: HashMap::with_capacity(16), // Pre-allocate for typical usage
             next_id: 0,
         }
     }
@@ -82,16 +82,19 @@ impl TempFileGuard {
         let path_clone = path.clone();
         let description = format!("temporary file: {}", path.display());
 
-        let registry_id = CLEANUP_REGISTRY
-            .lock()
-            .unwrap()
-            .register(description, move || {
+        let registry_id = match CLEANUP_REGISTRY.lock() {
+            Ok(mut registry) => Some(registry.register(description, move || {
                 let _ = fs::remove_file(&path_clone);
-            });
+            })),
+            Err(e) => {
+                log::error!("Failed to lock cleanup registry: {}", e);
+                None
+            }
+        };
 
         Self {
             path,
-            registry_id: Some(registry_id),
+            registry_id,
             cleanup_on_drop: true,
         }
     }
@@ -105,7 +108,11 @@ impl TempFileGuard {
     pub fn keep(mut self) -> PathBuf {
         self.cleanup_on_drop = false;
         if let Some(id) = self.registry_id.take() {
-            CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+            if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                registry.unregister(id);
+            } else {
+                log::error!("Failed to lock cleanup registry for unregister");
+            }
         }
         self.path.clone()
     }
@@ -114,7 +121,11 @@ impl TempFileGuard {
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if let Some(id) = self.registry_id.take() {
-            CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+            if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                registry.unregister(id);
+            } else {
+                log::error!("Failed to lock cleanup registry for unregister");
+            }
         }
 
         if self.cleanup_on_drop && self.path.exists() {
@@ -145,16 +156,19 @@ impl TempDirGuard {
         let path_clone = path.clone();
         let description = format!("temporary directory: {}", path.display());
 
-        let registry_id = CLEANUP_REGISTRY
-            .lock()
-            .unwrap()
-            .register(description, move || {
+        let registry_id = match CLEANUP_REGISTRY.lock() {
+            Ok(mut registry) => Some(registry.register(description, move || {
                 let _ = fs::remove_dir_all(&path_clone);
-            });
+            })),
+            Err(e) => {
+                log::error!("Failed to lock cleanup registry: {}", e);
+                None
+            }
+        };
 
         Ok(Self {
             path,
-            registry_id: Some(registry_id),
+            registry_id,
             cleanup_on_drop: true,
         })
     }
@@ -168,7 +182,11 @@ impl TempDirGuard {
     pub fn keep(mut self) -> PathBuf {
         self.cleanup_on_drop = false;
         if let Some(id) = self.registry_id.take() {
-            CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+            if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                registry.unregister(id);
+            } else {
+                log::error!("Failed to lock cleanup registry for unregister");
+            }
         }
         self.path.clone()
     }
@@ -177,7 +195,11 @@ impl TempDirGuard {
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         if let Some(id) = self.registry_id.take() {
-            CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+            if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                registry.unregister(id);
+            } else {
+                log::error!("Failed to lock cleanup registry for unregister");
+            }
         }
 
         if self.cleanup_on_drop && self.path.exists() {
@@ -206,10 +228,8 @@ impl ProcessGuard {
         let pid = child.id();
         let description = format!("process: PID {}", pid);
 
-        let registry_id = CLEANUP_REGISTRY
-            .lock()
-            .unwrap()
-            .register(description, move || {
+        let registry_id = match CLEANUP_REGISTRY.lock() {
+            Ok(mut registry) => Some(registry.register(description, move || {
                 // Try to kill the process
                 #[cfg(unix)]
                 {
@@ -229,11 +249,16 @@ impl ProcessGuard {
                         .args(&["/F", "/PID", &pid.to_string()])
                         .status();
                 }
-            });
+            })),
+            Err(e) => {
+                log::error!("Failed to lock cleanup registry: {}", e);
+                None
+            }
+        };
 
         Self {
             child: Some(child),
-            registry_id: Some(registry_id),
+            registry_id,
             timeout,
             started_at: Instant::now(),
         }
@@ -255,7 +280,11 @@ impl ProcessGuard {
                 Ok(Some(status)) => {
                     self.child = None;
                     if let Some(id) = self.registry_id.take() {
-                        CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+                        if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                            registry.unregister(id);
+                        } else {
+                            log::error!("Failed to lock cleanup registry for unregister");
+                        }
                     }
                     Ok(status)
                 }
@@ -271,7 +300,13 @@ impl ProcessGuard {
                             Ok(Some(status)) => {
                                 self.child = None;
                                 if let Some(id) = self.registry_id.take() {
-                                    CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+                                    if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                                        registry.unregister(id);
+                                    } else {
+                                        log::error!(
+                                            "Failed to lock cleanup registry for unregister"
+                                        );
+                                    }
                                 }
                                 return Ok(status);
                             }
@@ -304,7 +339,11 @@ impl ProcessGuard {
     pub fn kill(&mut self) -> Result<()> {
         if let Some(mut child) = self.child.take() {
             if let Some(id) = self.registry_id.take() {
-                CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+                if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                    registry.unregister(id);
+                } else {
+                    log::error!("Failed to lock cleanup registry for unregister");
+                }
             }
 
             child
@@ -317,7 +356,11 @@ impl ProcessGuard {
     /// Take ownership of the child process
     pub fn into_inner(mut self) -> Option<std::process::Child> {
         if let Some(id) = self.registry_id.take() {
-            CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+            if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                registry.unregister(id);
+            } else {
+                log::error!("Failed to lock cleanup registry for unregister");
+            }
         }
         self.child.take()
     }
@@ -326,7 +369,11 @@ impl ProcessGuard {
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         if let Some(id) = self.registry_id.take() {
-            CLEANUP_REGISTRY.lock().unwrap().unregister(id);
+            if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+                registry.unregister(id);
+            } else {
+                log::error!("Failed to lock cleanup registry for unregister");
+            }
         }
 
         if let Some(mut child) = self.child.take() {
@@ -383,7 +430,11 @@ pub fn init_cleanup_handler() {
                 log::info!("Received signal {}, cleaning up resources...", sig);
 
                 if let Some(registry) = registry.upgrade() {
-                    registry.lock().unwrap().cleanup_all();
+                    if let Ok(mut reg) = registry.lock() {
+                        reg.cleanup_all();
+                    } else {
+                        log::error!("Failed to lock cleanup registry in signal handler");
+                    }
                 }
 
                 std::process::exit(128 + sig);
@@ -395,7 +446,11 @@ pub fn init_cleanup_handler() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         // Clean up resources before panicking
-        CLEANUP_REGISTRY.lock().unwrap().cleanup_all();
+        if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+            registry.cleanup_all();
+        } else {
+            eprintln!("Failed to lock cleanup registry in panic handler");
+        }
 
         // Call the original panic handler
         original_hook(panic_info);
@@ -404,7 +459,11 @@ pub fn init_cleanup_handler() {
 
 /// Clean up all registered resources (for emergency cleanup)
 pub fn cleanup_all_resources() {
-    CLEANUP_REGISTRY.lock().unwrap().cleanup_all();
+    if let Ok(mut registry) = CLEANUP_REGISTRY.lock() {
+        registry.cleanup_all();
+    } else {
+        log::error!("Failed to lock cleanup registry for cleanup_all_resources");
+    }
 }
 
 /// Scoped cleanup guard that runs a function on drop
