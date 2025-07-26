@@ -1,6 +1,7 @@
+use crate::sync_env::SyncEnv;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::env;
 
 /// Environment variables that should be ignored when computing diffs
 const IGNORED_VARS: &[&str] = &[
@@ -38,9 +39,9 @@ impl EnvDiff {
     }
 
     /// Create a diff from the current environment to a new environment
-    pub fn from_current(next: HashMap<String, String>) -> Self {
-        let current = env::vars().collect();
-        Self::new(current, next)
+    pub fn from_current(next: HashMap<String, String>) -> Result<Self> {
+        let current = SyncEnv::vars()?.into_iter().collect();
+        Ok(Self::new(current, next))
     }
 
     /// Get the variables that were added or changed
@@ -86,16 +87,18 @@ impl EnvDiff {
     }
 
     /// Apply this diff to the current environment
-    pub fn apply(&self) {
+    pub fn apply(&self) -> Result<()> {
         // Remove variables that are in prev but not in next
         for key in self.removed() {
-            env::remove_var(key);
+            SyncEnv::remove_var(key)?;
         }
 
         // Add or update variables
         for (key, value) in self.added_or_changed() {
-            env::set_var(key, value);
+            SyncEnv::set_var(key, value)?;
         }
+
+        Ok(())
     }
 
     /// Reverse this diff (swap prev and next)

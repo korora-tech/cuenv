@@ -1,10 +1,14 @@
+use crate::cache_manager::CacheManager;
+use crate::cleanup::ProcessGuard;
 use crate::cue_parser::TaskConfig;
 use crate::env_manager::EnvManager;
 use crate::errors::{Error, Result};
+use crate::security::SecurityValidator;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::task::JoinSet;
 
 /// Represents a task execution plan with resolved dependencies
@@ -20,15 +24,17 @@ pub struct TaskExecutionPlan {
 pub struct TaskExecutor {
     env_manager: EnvManager,
     working_dir: PathBuf,
+    cache_manager: Arc<CacheManager>,
 }
 
 impl TaskExecutor {
     /// Create a new task executor
-    pub fn new(env_manager: EnvManager, working_dir: PathBuf) -> Self {
-        Self {
+    pub fn new(env_manager: EnvManager, working_dir: PathBuf) -> Result<Self> {
+        Ok(Self {
             env_manager,
             working_dir,
-        }
+            cache_manager: Arc::new(CacheManager::new()?),
+        })
     }
 
     /// Execute a single task by name
@@ -56,37 +62,53 @@ impl TaskExecutor {
         // Execute tasks level by level
         for level in &plan.levels {
             let mut join_set = JoinSet::new();
-            let failed_tasks = Arc::new(Mutex::new(Vec::new()));
+            let failed_tasks = Arc::new(Mutex::new(Vec::with_capacity(level.len())));
 
             // Launch all tasks in this level concurrently
             for task_name in level {
-                let task_config = plan.tasks.get(task_name).unwrap().clone();
+                let task_config = match plan.tasks.get(task_name) {
+                    Some(config) => config.clone(),
+                    None => {
+                        return Err(Error::configuration(format!(
+                            "Task '{}' not found in execution plan",
+                            task_name
+                        )));
+                    }
+                };
                 let working_dir = self.working_dir.clone();
                 let task_args = args.to_vec();
                 let failed_tasks = Arc::clone(&failed_tasks);
                 let task_name = task_name.clone();
+                let cache_manager = Arc::clone(&self.cache_manager);
 
                 join_set.spawn(async move {
-                    match Self::execute_single_task(
+                    match Self::execute_single_task_with_cache(
+                        &task_name,
                         &task_config,
                         &working_dir,
                         &task_args,
+                        &cache_manager,
                         audit_mode,
                     )
                     .await
                     {
                         Ok(status) => {
                             if status != 0 {
-                                failed_tasks
-                                    .lock()
-                                    .unwrap()
-                                    .push((task_name.clone(), status));
+                                if let Ok(mut guard) = failed_tasks.lock() {
+                                    guard.push((task_name, status));
+                                } else {
+                                    log::error!("Failed to acquire lock for failed tasks tracking");
+                                }
                             }
                             status
                         }
                         Err(e) => {
-                            failed_tasks.lock().unwrap().push((task_name.clone(), -1));
-                            eprintln!("Task '{task_name}' failed: {e}");
+                            if let Ok(mut guard) = failed_tasks.lock() {
+                                guard.push((task_name.clone(), -1));
+                            } else {
+                                log::error!("Failed to acquire lock for failed tasks tracking");
+                            }
+                            eprintln!("Task '{}' failed: {}", task_name, e);
                             -1
                         }
                     }
@@ -101,10 +123,12 @@ impl TaskExecutor {
             }
 
             // Check if any tasks failed
-            let failed = failed_tasks.lock().unwrap();
+            let failed = failed_tasks
+                .lock()
+                .map_err(|e| Error::configuration(format!("Failed to acquire lock: {}", e)))?;
             if !failed.is_empty() {
-                let failed_names: Vec<String> =
-                    failed.iter().map(|(name, _)| name.clone()).collect();
+                let failed_names: Vec<&str> =
+                    failed.iter().map(|(name, _)| name.as_str()).collect();
                 return Err(Error::configuration(format!(
                     "Tasks failed: {}",
                     failed_names.join(", ")
@@ -129,8 +153,8 @@ impl TaskExecutor {
         }
 
         // Build dependency graph
-        let mut task_dependencies = HashMap::new();
-        let mut visited = HashSet::new();
+        let mut task_dependencies = HashMap::with_capacity(all_tasks.len());
+        let mut visited = HashSet::with_capacity(all_tasks.len());
         let mut stack = HashSet::new();
 
         for task_name in task_names {
@@ -147,7 +171,7 @@ impl TaskExecutor {
         let levels = self.topological_sort(&task_dependencies)?;
 
         // Build final execution plan
-        let mut plan_tasks = HashMap::new();
+        let mut plan_tasks = HashMap::with_capacity(task_dependencies.len());
         for task_name in task_dependencies.keys() {
             if let Some(config) = all_tasks.get(task_name) {
                 plan_tasks.insert(task_name.clone(), config.clone());
@@ -179,7 +203,7 @@ impl TaskExecutor {
             return Ok(());
         }
 
-        stack.insert(task_name.to_string());
+        stack.insert(task_name.to_owned());
 
         let task_config = all_tasks
             .get(task_name)
@@ -198,8 +222,8 @@ impl TaskExecutor {
             Self::collect_dependencies(dep_name, all_tasks, task_dependencies, visited, stack)?;
         }
 
-        task_dependencies.insert(task_name.to_string(), dependencies);
-        visited.insert(task_name.to_string());
+        task_dependencies.insert(task_name.to_owned(), dependencies);
+        visited.insert(task_name.to_owned());
         stack.remove(task_name);
 
         Ok(())
@@ -210,13 +234,13 @@ impl TaskExecutor {
         &self,
         dependencies: &HashMap<String, Vec<String>>,
     ) -> Result<Vec<Vec<String>>> {
-        let mut in_degree = HashMap::new();
-        let mut graph = HashMap::new();
+        let mut in_degree = HashMap::with_capacity(dependencies.len());
+        let mut graph = HashMap::with_capacity(dependencies.len());
 
         // Initialize in-degree count and adjacency list
         for (task, deps) in dependencies {
             in_degree.entry(task.clone()).or_insert(0);
-            graph.entry(task.clone()).or_insert(Vec::new());
+            graph.entry(task.clone()).or_insert_with(Vec::new);
 
             for dep in deps {
                 *in_degree.entry(dep.clone()).or_insert(0) += 0; // Ensure dep is in map
@@ -224,11 +248,18 @@ impl TaskExecutor {
                     .entry(dep.clone())
                     .or_insert_with(Vec::new)
                     .push(task.clone());
-                *in_degree.get_mut(task).unwrap() += 1;
+                if let Some(degree) = in_degree.get_mut(task) {
+                    *degree += 1;
+                } else {
+                    return Err(Error::configuration(format!(
+                        "Task '{}' not found in in-degree map",
+                        task
+                    )));
+                }
             }
         }
 
-        let mut levels = Vec::new();
+        let mut levels = Vec::with_capacity(dependencies.len() / 2); // Estimate
         let mut queue: VecDeque<String> = in_degree
             .iter()
             .filter(|(_, &degree)| degree == 0)
@@ -267,6 +298,39 @@ impl TaskExecutor {
         }
 
         Ok(levels)
+    }
+
+    /// Execute a single task with caching support
+    async fn execute_single_task_with_cache(
+        task_name: &str,
+        task_config: &TaskConfig,
+        working_dir: &Path,
+        args: &[String],
+        cache_manager: &CacheManager,
+        audit_mode: bool,
+    ) -> Result<i32> {
+        // Generate cache key
+        let cache_key = cache_manager.generate_cache_key(task_name, task_config, working_dir)?;
+
+        // Check if task result is cached
+        if let Some(cached_result) =
+            cache_manager.get_cached_result(&cache_key, task_config, working_dir)?
+        {
+            println!("✓ Task '{}' found in cache, skipping execution", task_name);
+            return Ok(cached_result.exit_code);
+        }
+
+        // Execute the task
+        println!("→ Executing task '{}'", task_name);
+        let exit_code =
+            Self::execute_single_task(task_config, working_dir, args, audit_mode).await?;
+
+        // Cache the result
+        if let Err(e) = cache_manager.save_result(&cache_key, task_config, working_dir, exit_code) {
+            log::warn!("Failed to cache task '{}' result: {}", task_name, e);
+        }
+
+        Ok(exit_code)
     }
 
     /// Execute a single task
@@ -312,16 +376,36 @@ impl TaskExecutor {
             }
         };
 
+        // Validate shell command for security
+        // Use a static set for allowed shells to avoid repeated allocations
+        static ALLOWED_SHELLS: &[&str] = &["sh", "bash", "zsh", "fish", "pwsh", "powershell"];
+        let allowed_shells: HashSet<String> =
+            ALLOWED_SHELLS.iter().map(|&s| s.to_string()).collect();
+
+        SecurityValidator::validate_command(&shell, &allowed_shells)?;
+
+        // Validate script content for dangerous patterns
+        SecurityValidator::validate_shell_expansion(&script_content)?;
+
+        // Validate user arguments
+        if !args.is_empty() {
+            SecurityValidator::validate_command_args(args)?;
+        }
+
         // Determine working directory
         let exec_dir = if let Some(task_wd) = &task_config.working_dir {
             let mut dir = working_dir.to_path_buf();
             dir.push(task_wd);
+
+            // Validate the working directory path
+            SecurityValidator::validate_path(&dir, &[working_dir.to_path_buf()])?;
+
             dir
         } else {
             working_dir.to_path_buf()
         };
 
-        // Execute the task
+        // Configure process group for better cleanup
         let mut cmd = Command::new(&shell);
         cmd.arg("-c")
             .arg(&script_content)
@@ -329,6 +413,27 @@ impl TaskExecutor {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+
+        // On Unix, create a new process group for better cleanup
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+
+            // Apply resource limits before spawning
+            unsafe {
+                cmd.pre_exec(|| {
+                    use crate::resource_limits::apply_default_limits;
+                    match apply_default_limits() {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            eprintln!("Warning: Failed to apply resource limits: {}", e);
+                            Ok(()) // Continue anyway
+                        }
+                    }
+                });
+            }
+        }
 
         // Apply security restrictions if configured
         if let Some(security) = &task_config.security {
@@ -348,21 +453,60 @@ impl TaskExecutor {
             }
         }
 
-        let output = cmd.output().map_err(|e| {
+        // Spawn the process with timeout
+        let child = cmd.spawn().map_err(|e| {
             Error::command_execution(
                 &shell,
                 vec!["-c".to_string(), script_content.clone()],
-                format!("Failed to execute task: {e}"),
+                format!("Failed to spawn task: {e}"),
                 None,
             )
         })?;
 
-        Ok(output.status.code().unwrap_or(1))
+        // Use ProcessGuard for automatic cleanup
+        let timeout = match task_config.timeout {
+            Some(timeout_secs) => Duration::from_secs(timeout_secs as u64),
+            None => Duration::from_secs(3600), // Default 1 hour timeout
+        };
+
+        let mut guard = ProcessGuard::new(child, timeout);
+
+        // Wait for completion with timeout
+        let status = guard.wait_with_timeout().map_err(|e| {
+            Error::command_execution(
+                &shell,
+                vec!["-c".to_string(), script_content.clone()],
+                e.to_string(),
+                None,
+            )
+        })?;
+
+        Ok(status.code().unwrap_or(1))
     }
 
     /// List all available tasks
     pub fn list_tasks(&self) -> Vec<(String, Option<String>)> {
         self.env_manager.list_tasks()
+    }
+
+    /// Clear the task cache
+    pub fn clear_cache(&self) -> Result<()> {
+        self.cache_manager.clear()
+    }
+
+    /// Get cache statistics
+    pub fn get_cache_statistics(&self) -> Result<crate::cache_manager::CacheStatistics> {
+        self.cache_manager.get_statistics()
+    }
+
+    /// Print cache statistics
+    pub fn print_cache_statistics(&self) -> Result<()> {
+        self.cache_manager.print_statistics()
+    }
+
+    /// Clean up stale cache entries
+    pub fn cleanup_cache(&self, max_age: Duration) -> Result<(usize, u64)> {
+        self.cache_manager.cleanup(max_age)
     }
 }
 
@@ -372,18 +516,18 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn create_test_env_manager_with_tasks(tasks_cue: &str) -> (EnvManager, TempDir) {
+    async fn create_test_env_manager_with_tasks(tasks_cue: &str) -> (EnvManager, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let env_file = temp_dir.path().join("env.cue");
         fs::write(&env_file, tasks_cue).unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load_env(temp_dir.path()).unwrap();
+        manager.load_env(temp_dir.path()).await.unwrap();
         (manager, temp_dir)
     }
 
-    #[test]
-    fn test_simple_task_discovery() {
+    #[tokio::test]
+    async fn test_simple_task_discovery() {
         let tasks_cue = r#"package env
 
 env: {
@@ -401,8 +545,8 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let tasks = executor.list_tasks();
         assert_eq!(tasks.len(), 2);
@@ -412,8 +556,8 @@ tasks: {
         assert!(task_names.contains(&&"test".to_string()));
     }
 
-    #[test]
-    fn test_task_dependency_resolution() {
+    #[tokio::test]
+    async fn test_task_dependency_resolution() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -430,8 +574,8 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let plan = executor
             .build_execution_plan(&["build".to_string()])
@@ -443,8 +587,8 @@ tasks: {
         assert_eq!(plan.levels[1], vec!["build"]);
     }
 
-    #[test]
-    fn test_circular_dependency_detection() {
+    #[tokio::test]
+    async fn test_circular_dependency_detection() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -460,8 +604,8 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["task1".to_string()]);
         assert!(result.is_err());
@@ -471,8 +615,8 @@ tasks: {
             .contains("Circular dependency"));
     }
 
-    #[test]
-    fn test_missing_task_error() {
+    #[tokio::test]
+    async fn test_missing_task_error() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -483,16 +627,16 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["nonexistent".to_string()]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[test]
-    fn test_missing_dependency_error() {
+    #[tokio::test]
+    async fn test_missing_dependency_error() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -504,16 +648,16 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["build".to_string()]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[test]
-    fn test_complex_dependency_graph() {
+    #[tokio::test]
+    async fn test_complex_dependency_graph() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -536,8 +680,8 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let plan = executor
             .build_execution_plan(&["deploy".to_string()])

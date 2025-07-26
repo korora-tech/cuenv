@@ -427,6 +427,22 @@ func extractCueData(v cue.Value) map[string]interface{} {
 				taskConfig["security"] = security
 			}
 
+			// Extract cache
+			if cacheField := iter.Value().LookupPath(cue.ParsePath("cache")); cacheField.Exists() {
+				var cache bool
+				if err := cacheField.Decode(&cache); err == nil {
+					taskConfig["cache"] = cache
+				}
+			}
+
+			// Extract cacheKey
+			if cacheKeyField := iter.Value().LookupPath(cue.ParsePath("cacheKey")); cacheKeyField.Exists() {
+				var cacheKey string
+				if err := cacheKeyField.Decode(&cacheKey); err == nil {
+					taskConfig["cacheKey"] = cacheKey
+				}
+			}
+
 			tasks[taskName] = taskConfig
 		}
 		result["tasks"] = tasks

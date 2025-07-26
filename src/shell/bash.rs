@@ -23,6 +23,8 @@ fi"#
     }
 
     fn export(&self, key: &str, value: &str) -> String {
+        // Note: Key validation should be done by the caller to handle errors properly
+        // This is just the formatting function
         format!("export {key}={}", self.escape(value))
     }
 

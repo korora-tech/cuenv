@@ -1,9 +1,11 @@
 use clap::{Parser, Subcommand};
+use cuenv::async_runtime::run_async;
 use cuenv::constants::{CUENV_CAPABILITIES_VAR, CUENV_ENV_VAR, ENV_CUE_FILENAME};
 use cuenv::errors::{Error, Result};
 use cuenv::platform::{PlatformOps, Shell};
 use cuenv::shell::ShellType;
 use cuenv::state::StateManager;
+use cuenv::sync_env::InstanceLock;
 use cuenv::{
     directory::DirectoryManager, env_manager::EnvManager, shell_hook::ShellHook,
     task_executor::TaskExecutor,
@@ -108,10 +110,34 @@ enum Commands {
     },
     /// Prune stale state
     Prune,
+    /// Clear task cache
+    ClearCache,
+    /// Cache management commands
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// Clear all cache entries
+    Clear,
+    /// Show cache statistics
+    Stats,
+    /// Clean up stale cache entries
+    Cleanup {
+        /// Maximum age of cache entries to keep (in hours)
+        #[arg(long, default_value = "168")]
+        max_age_hours: u64,
+    },
 }
 
 fn main() -> Result<()> {
     env_logger::init();
+
+    // Initialize cleanup handling for proper resource management
+    cuenv::cleanup::init_cleanup_handler();
 
     let cli = Cli::parse();
 
@@ -121,6 +147,16 @@ fn main() -> Result<()> {
             environment,
             capabilities,
         }) => {
+            // Acquire instance lock to prevent concurrent modifications
+            let _lock = match InstanceLock::acquire() {
+                Ok(lock) => lock,
+                Err(e) => {
+                    return Err(Error::Configuration {
+                        message: e.to_string(),
+                    })
+                }
+            };
+
             let dir = match directory {
                 Some(d) => d,
                 None => match env::current_dir() {
@@ -152,10 +188,7 @@ fn main() -> Result<()> {
             }
 
             // Load environment with options
-            match env_manager.load_env_with_options(&dir, env_name, caps, None) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
+            run_async(env_manager.load_env_with_options(&dir, env_name, caps, None))?;
 
             let shell = Platform::get_current_shell()
                 .unwrap_or(Shell::Bash)
@@ -167,11 +200,18 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::Unload) => {
+            // Acquire instance lock to prevent concurrent modifications
+            let _lock = match InstanceLock::acquire() {
+                Ok(lock) => lock,
+                Err(e) => {
+                    return Err(Error::Configuration {
+                        message: e.to_string(),
+                    })
+                }
+            };
+
             let mut env_manager = EnvManager::new();
-            match env_manager.unload_env() {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
+            env_manager.unload_env()?;
 
             let shell = Platform::get_current_shell()
                 .unwrap_or(Shell::Bash)
@@ -252,14 +292,14 @@ fn main() -> Result<()> {
             }
 
             // Load environment with options
-            env_manager.load_env_with_options(&current_dir, env_name, caps, None)?;
+            run_async(env_manager.load_env_with_options(&current_dir, env_name, caps, None))?;
 
             match task_name {
                 Some(name) => {
                     // Check if this is a defined task first
                     if env_manager.get_task(&name).is_some() {
                         // Execute the specified task
-                        let executor = TaskExecutor::new(env_manager, current_dir);
+                        let executor = TaskExecutor::new(env_manager, current_dir)?;
                         let rt = tokio::runtime::Runtime::new().map_err(|e| {
                             Error::configuration(format!("Failed to create async runtime: {e}"))
                         })?;
@@ -341,7 +381,12 @@ fn main() -> Result<()> {
             }
 
             // Load environment with options and command for inference
-            env_manager.load_env_with_options(&current_dir, env_name, caps, Some(&command))?;
+            run_async(env_manager.load_env_with_options(
+                &current_dir,
+                env_name,
+                caps,
+                Some(&command),
+            ))?;
 
             // Execute the command with the loaded environment
             if audit {
@@ -408,8 +453,11 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                StateManager::unload()
-                    .map_err(|e| Error::configuration(format!("Failed to unload state: {e}")))?;
+                run_async(async {
+                    StateManager::unload()
+                        .await
+                        .map_err(|e| Error::configuration(format!("Failed to unload state: {e}")))
+                })?;
             } else if current_dir.join(ENV_CUE_FILENAME).exists() {
                 // Check if directory is allowed
                 let dir_manager = DirectoryManager::new();
@@ -421,7 +469,7 @@ fn main() -> Result<()> {
                     if StateManager::files_changed() || StateManager::should_load(&current_dir) {
                         // Need to load/reload
                         let mut env_manager = EnvManager::new();
-                        if let Err(e) = env_manager.load_env(&current_dir) {
+                        if let Err(e) = run_async(env_manager.load_env(&current_dir)) {
                             eprintln!("# cuenv: failed to load environment: {e}");
                         } else {
                             // Output export commands
@@ -488,11 +536,57 @@ fn main() -> Result<()> {
         Some(Commands::Prune) => {
             // For now, just unload if there's state
             if StateManager::is_loaded() {
-                StateManager::unload()
-                    .map_err(|e| Error::configuration(format!("Failed to unload state: {e}")))?;
+                run_async(async {
+                    StateManager::unload()
+                        .await
+                        .map_err(|e| Error::configuration(format!("Failed to unload state: {e}")))
+                })?;
                 println!("Pruned cuenv state");
             } else {
                 println!("No cuenv state to prune");
+            }
+        }
+        Some(Commands::ClearCache) => {
+            // Legacy command - redirect to new cache clear command
+            let cache_manager = cuenv::cache_manager::CacheManager::new()?;
+            match cache_manager.clear() {
+                Ok(()) => println!("✓ Task cache cleared"),
+                Err(e) => {
+                    eprintln!("Failed to clear task cache: {e}");
+                    return Err(e);
+                }
+            }
+        }
+        Some(Commands::Cache { command }) => {
+            let cache_manager = cuenv::cache_manager::CacheManager::new()?;
+
+            match command {
+                CacheCommands::Clear => match cache_manager.clear() {
+                    Ok(()) => println!("✓ Cache cleared successfully"),
+                    Err(e) => {
+                        eprintln!("Failed to clear cache: {e}");
+                        return Err(e);
+                    }
+                },
+                CacheCommands::Stats => {
+                    cache_manager.print_statistics();
+                }
+                CacheCommands::Cleanup { max_age_hours } => {
+                    use std::time::Duration;
+
+                    let max_age = Duration::from_secs(max_age_hours * 3600);
+                    match cache_manager.cleanup(max_age) {
+                        Ok((removed_count, bytes_freed)) => {
+                            println!("✓ Cache cleanup completed");
+                            println!("  Removed {} entries", removed_count);
+                            println!("  Freed {} bytes", bytes_freed);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to cleanup cache: {e}");
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
         None => {
@@ -506,7 +600,7 @@ fn main() -> Result<()> {
             };
 
             let mut env_manager = EnvManager::new();
-            match env_manager.load_env(&current_dir) {
+            match run_async(env_manager.load_env(&current_dir)) {
                 Ok(()) => println!("cuenv: loaded CUE package from {}", current_dir.display()),
                 Err(e) => {
                     eprintln!("cuenv: failed to load CUE package: {e}");

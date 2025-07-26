@@ -28,7 +28,9 @@ impl AsyncRuntime {
             self.runtime = Some(runtime);
         }
 
-        Ok(self.runtime.as_ref().unwrap())
+        self.runtime.as_ref().ok_or_else(|| {
+            Error::configuration("runtime unexpectedly missing after initialization")
+        })
     }
 
     /// Execute an async function, creating a runtime if needed
@@ -92,31 +94,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sync_context_execution() {
+    fn test_sync_context_execution() -> Result<()> {
         let mut runtime = AsyncRuntime::new();
 
         let result = runtime.block_on(async { Ok::<i32, Error>(42) });
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
+        assert_eq!(result?, 42);
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_async_context_detection() {
+    async fn test_async_context_detection() -> Result<()> {
         assert!(AsyncRuntime::is_in_async_context());
 
         let result = AsyncRuntime::execute(async { Ok::<i32, Error>(42) }).await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
+        assert_eq!(result?, 42);
+
+        Ok(())
     }
 
     #[test]
-    fn test_run_async_helper() {
+    fn test_run_async_helper() -> Result<()> {
         let result = run_async(async { Ok::<String, Error>("hello".to_string()) });
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "hello");
+        assert_eq!(result?, "hello");
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -125,6 +133,8 @@ mod tests {
         let result = run_async(async { Ok::<String, Error>("should fail".to_string()) });
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("async runtime"));
+        if let Err(e) = result {
+            assert!(e.to_string().contains("async runtime"));
+        }
     }
 }

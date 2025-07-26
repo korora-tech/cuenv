@@ -149,7 +149,9 @@ impl DirectoryManager {
 
     fn get_allowed_file(&self) -> Result<PathBuf> {
         let allowed_file = XdgPaths::allowed_file();
-        let data_dir = allowed_file.parent().unwrap();
+        let data_dir = allowed_file
+            .parent()
+            .ok_or_else(|| Error::configuration("allowed file path has no parent directory"))?;
 
         // Create data directory if it doesn't exist
         if !data_dir.exists() {
@@ -206,9 +208,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_current_directory() {
+    fn test_get_current_directory() -> Result<()> {
         let result = DirectoryManager::get_current_directory();
         assert!(result.is_ok());
-        assert!(result.unwrap().exists());
+        assert!(result?.exists());
+
+        Ok(())
     }
 }

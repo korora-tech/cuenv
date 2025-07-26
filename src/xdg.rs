@@ -79,25 +79,53 @@ impl XdgPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_env::SyncEnv;
     use std::env;
 
     #[test]
     fn test_xdg_paths_with_env() {
-        env::set_var("XDG_CONFIG_HOME", "/tmp/config");
-        env::set_var("XDG_DATA_HOME", "/tmp/data");
-        env::set_var("XDG_STATE_HOME", "/tmp/state");
-        env::set_var("XDG_CACHE_HOME", "/tmp/cache");
+        // Save current values
+        let config_orig = SyncEnv::var("XDG_CONFIG_HOME").unwrap();
+        let data_orig = SyncEnv::var("XDG_DATA_HOME").unwrap();
+        let state_orig = SyncEnv::var("XDG_STATE_HOME").unwrap();
+        let cache_orig = SyncEnv::var("XDG_CACHE_HOME").unwrap();
+
+        // Set test values
+        SyncEnv::set_var("XDG_CONFIG_HOME", "/tmp/config").unwrap();
+        SyncEnv::set_var("XDG_DATA_HOME", "/tmp/data").unwrap();
+        SyncEnv::set_var("XDG_STATE_HOME", "/tmp/state").unwrap();
+        SyncEnv::set_var("XDG_CACHE_HOME", "/tmp/cache").unwrap();
 
         assert_eq!(XdgPaths::config_dir(), PathBuf::from("/tmp/config/cuenv"));
         assert_eq!(XdgPaths::data_dir(), PathBuf::from("/tmp/data/cuenv"));
         assert_eq!(XdgPaths::state_dir(), PathBuf::from("/tmp/state/cuenv"));
         assert_eq!(XdgPaths::cache_dir(), PathBuf::from("/tmp/cache/cuenv"));
 
-        // Clean up
-        env::remove_var("XDG_CONFIG_HOME");
-        env::remove_var("XDG_DATA_HOME");
-        env::remove_var("XDG_STATE_HOME");
-        env::remove_var("XDG_CACHE_HOME");
+        // Restore original values or remove
+        match config_orig {
+            Some(val) => SyncEnv::set_var("XDG_CONFIG_HOME", val).unwrap(),
+            None => {
+                let _ = SyncEnv::remove_var("XDG_CONFIG_HOME");
+            }
+        }
+        match data_orig {
+            Some(val) => SyncEnv::set_var("XDG_DATA_HOME", val).unwrap(),
+            None => {
+                let _ = SyncEnv::remove_var("XDG_DATA_HOME");
+            }
+        }
+        match state_orig {
+            Some(val) => SyncEnv::set_var("XDG_STATE_HOME", val).unwrap(),
+            None => {
+                let _ = SyncEnv::remove_var("XDG_STATE_HOME");
+            }
+        }
+        match cache_orig {
+            Some(val) => SyncEnv::set_var("XDG_CACHE_HOME", val).unwrap(),
+            None => {
+                let _ = SyncEnv::remove_var("XDG_CACHE_HOME");
+            }
+        }
     }
 
     #[test]

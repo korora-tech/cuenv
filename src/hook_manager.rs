@@ -1,5 +1,9 @@
+use crate::audit::{audit_logger, AuditLogger};
 use crate::command_executor::CommandExecutor;
 use crate::cue_parser::{HookConfig, HookConstraint};
+use crate::rate_limit::RateLimitManager;
+use crate::resilience::{CircuitBreaker, CircuitBreakerConfig, RetryConfig};
+use crate::security::SecurityValidator;
 use crate::types::{CommandArguments, EnvironmentVariables};
 use anyhow::{anyhow, Result};
 use lru::LruCache;
@@ -7,7 +11,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{RwLock, Semaphore};
 use url::Url;
 
 const DEFAULT_CACHE_SIZE: usize = 100;
@@ -30,9 +34,13 @@ impl CachedContent {
 pub struct HookManager<E: CommandExecutor + Send + Sync> {
     executor: Arc<E>,
     http_client: reqwest::Client,
-    cache: Arc<Mutex<LruCache<String, CachedContent>>>,
+    cache: Arc<RwLock<LruCache<String, CachedContent>>>,
     semaphore: Arc<Semaphore>,
     cache_ttl: Duration,
+    rate_limiter: Option<Arc<RateLimitManager>>,
+    audit_logger: Option<Arc<AuditLogger>>,
+    circuit_breaker: Arc<CircuitBreaker>,
+    retry_config: RetryConfig,
 }
 
 impl<E: CommandExecutor + Send + Sync> HookManager<E> {
@@ -45,9 +53,19 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
 
         let cache_size =
             NonZeroUsize::new(DEFAULT_CACHE_SIZE).ok_or_else(|| anyhow!("Invalid cache size"))?;
-        let cache = Arc::new(Mutex::new(LruCache::new(cache_size)));
+        let cache = Arc::new(RwLock::new(LruCache::new(cache_size)));
 
         let semaphore = Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_HOOKS));
+
+        let circuit_breaker_config = CircuitBreakerConfig {
+            failure_threshold: 5,
+            success_threshold: 2,
+            timeout: Duration::from_secs(300),       // 5 minutes
+            break_duration: Duration::from_secs(60), // 1 minute
+            half_open_max_calls: 3,
+        };
+
+        let retry_config = RetryConfig::for_network();
 
         Ok(Self {
             executor,
@@ -55,7 +73,17 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
             cache,
             semaphore,
             cache_ttl: DEFAULT_CACHE_TTL,
+            rate_limiter: None,
+            audit_logger: audit_logger(),
+            circuit_breaker: Arc::new(CircuitBreaker::new(circuit_breaker_config)),
+            retry_config,
         })
+    }
+
+    /// Set the rate limiter for hook execution
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimitManager>) -> Self {
+        self.rate_limiter = Some(rate_limiter);
+        self
     }
 
     pub async fn execute_hook(
@@ -63,6 +91,23 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
         hook_config: &HookConfig,
         env_vars: &HashMap<String, String>,
     ) -> Result<()> {
+        // Check rate limit if configured
+        let _rate_limit_permit = if let Some(ref rate_limiter) = self.rate_limiter {
+            match rate_limiter.try_acquire("hooks").await {
+                Ok(Some(permit)) => Some(permit),
+                Ok(None) => None,
+                Err(e) => {
+                    // Log rate limit exceeded
+                    if let Some(ref logger) = self.audit_logger {
+                        let _ = logger.log_rate_limit("hooks", 0, 0, true).await;
+                    }
+                    return Err(anyhow!("Rate limit exceeded: {}", e));
+                }
+            }
+        } else {
+            None
+        };
+
         let _permit = self
             .semaphore
             .acquire()
@@ -89,11 +134,28 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
             return Ok(());
         }
 
-        if let Some(url) = &hook_config.url {
+        let start_time = Instant::now();
+        let result = if let Some(url) = &hook_config.url {
             self.execute_remote_hook(url, env_vars).await
         } else {
             self.execute_local_hook(hook_config, env_vars).await
+        };
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+
+        // Log the hook execution
+        if let Some(ref logger) = self.audit_logger {
+            let _ = logger
+                .log_hook_execution(
+                    &format!("{:?}", hook_config.hook_type),
+                    &hook_config.command,
+                    &hook_config.args,
+                    result.is_ok(),
+                    duration_ms,
+                )
+                .await;
         }
+
+        result
     }
 
     async fn execute_local_hook(
@@ -136,7 +198,19 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
         url: &str,
         env_vars: &HashMap<String, String>,
     ) -> Result<()> {
+        // Validate URL is from allowed domains (should be configurable)
+        let parsed_url = Url::parse(url).map_err(|e| anyhow!("Invalid URL: {}", e))?;
+
+        // Example: Only allow HTTPS URLs
+        if parsed_url.scheme() != "https" {
+            return Err(anyhow!("Only HTTPS URLs are allowed for remote hooks"));
+        }
+
         let content = self.fetch_url_content(url).await?;
+
+        // Validate script content for security
+        SecurityValidator::validate_shell_expansion(&content)
+            .map_err(|e| anyhow!("Remote script validation failed: {}", e))?;
 
         log::debug!("Executing remote content from URL: {url}");
 
@@ -173,7 +247,7 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
         let cache_key = url.to_string();
 
         {
-            let mut cache = self.cache.lock().await;
+            let mut cache = self.cache.write().await;
             if let Some(cached) = cache.get(&cache_key) {
                 if !cached.is_expired(self.cache_ttl) {
                     log::debug!("Using cached content for URL: {url}");
@@ -204,7 +278,7 @@ impl<E: CommandExecutor + Send + Sync> HookManager<E> {
 
         // Update cache
         {
-            let mut cache = self.cache.lock().await;
+            let mut cache = self.cache.write().await;
             cache.put(
                 cache_key,
                 CachedContent {
