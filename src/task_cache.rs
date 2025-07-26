@@ -1,8 +1,7 @@
+use crate::cache::CacheEngine;
 use crate::cue_parser::TaskConfig;
 use crate::errors::{Error, Result};
-use crate::xdg::XdgPaths;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,16 +20,27 @@ pub struct CachedTaskResult {
     pub output_hashes: HashMap<String, String>,
 }
 
-/// Task cache manager implementing Bazel-style build caching
+impl Default for CachedTaskResult {
+    fn default() -> Self {
+        Self {
+            cache_key: String::new(),
+            executed_at: SystemTime::UNIX_EPOCH,
+            exit_code: 0,
+            output_hashes: HashMap::new(),
+        }
+    }
+}
+
+/// Task cache manager using moon-style caching infrastructure
 pub struct TaskCache {
-    cache_dir: PathBuf,
+    cache_engine: CacheEngine,
 }
 
 impl TaskCache {
     /// Create a new task cache instance
-    pub fn new() -> Self {
-        let cache_dir = XdgPaths::cache_dir().join("tasks");
-        Self { cache_dir }
+    pub fn new() -> Result<Self> {
+        let cache_engine = CacheEngine::new()?;
+        Ok(Self { cache_engine })
     }
 
     /// Generate a cache key for a task based on its configuration and inputs
@@ -40,32 +50,30 @@ impl TaskCache {
         task_config: &TaskConfig,
         working_dir: &Path,
     ) -> Result<String> {
-        let mut hasher = Sha256::new();
+        let mut hasher = self.cache_engine.hash.create_hasher(&format!("task:{}", task_name));
 
         // Use custom cache key if provided
         if let Some(custom_key) = &task_config.cache_key {
-            hasher.update(custom_key.as_bytes());
+            hasher.hash_content(custom_key)?;
         } else {
-            // Hash task name
-            hasher.update(task_name.as_bytes());
-
-            // Hash task configuration
-            let config_json = serde_json::to_string(task_config).map_err(|e| {
-                Error::configuration(format!("Failed to serialize task config: {e}"))
-            })?;
-            hasher.update(config_json.as_bytes());
+            // Hash task name and configuration
+            hasher.hash_content(task_name)?;
+            hasher.hash_content(task_config)?;
         }
 
         // Hash input files if specified
         if let Some(inputs) = &task_config.inputs {
             for input_pattern in inputs {
-                let input_hash = self.hash_input_pattern(input_pattern, working_dir)?;
-                hasher.update(input_hash.as_bytes());
+                hasher.hash_glob(input_pattern, working_dir)?;
             }
         }
 
-        let result = hasher.finalize();
-        Ok(format!("{:x}", result))
+        let hash = hasher.generate_hash()?;
+        
+        // Save the hash manifest
+        self.cache_engine.hash.save_manifest(&hasher, &hash)?;
+        
+        Ok(hash)
     }
 
     /// Check if a task result is cached and still valid
@@ -80,79 +88,75 @@ impl TaskCache {
             return Ok(None);
         }
 
-        let cache_file = self.cache_dir.join(format!("{}.json", cache_key));
-
-        if !cache_file.exists() {
+        // Return None if cache is not readable
+        if !self.cache_engine.is_readable() {
             return Ok(None);
         }
 
-        let cache_content = fs::read_to_string(&cache_file).map_err(|e| {
-            Error::file_system(cache_file.clone(), "read cache file", e)
-        })?;
+        let cache_item = self.cache_engine.cache::<CachedTaskResult>(
+            format!("tasks/{}", cache_key)
+        )?;
 
-        let cached_result: CachedTaskResult = serde_json::from_str(&cache_content).map_err(|e| {
-            Error::Json {
-                message: "Failed to parse cached task result".to_string(),
-                source: e,
+        if cache_item.path.exists() {
+            let cached_result = cache_item.data;
+            
+            // Verify cache key matches
+            if cached_result.cache_key != cache_key {
+                return Ok(None);
             }
-        })?;
 
-        // Verify cache key matches
-        if cached_result.cache_key != cache_key {
-            return Ok(None);
-        }
-
-        // Verify output files still exist and have correct hashes
-        if let Some(outputs) = &task_config.outputs {
-            for output_pattern in outputs {
-                let output_files = self.glob_files(output_pattern, working_dir)?;
-                
-                // Check if we have any expected outputs from cache but no actual files
-                if output_files.is_empty() && !cached_result.output_hashes.is_empty() {
-                    // We had output files when cached, but now we don't find any
-                    // This could mean files were deleted
-                    log::debug!("Cache miss: expected output files for pattern '{}' but found none", output_pattern);
-                    return Ok(None);
-                }
-                
-                for output_file in output_files {
-                    let relative_path = output_file
-                        .strip_prefix(working_dir)
-                        .unwrap_or(&output_file)
-                        .to_string_lossy()
-                        .to_string();
-
-                    // Check if output file exists
-                    if !output_file.exists() {
-                        log::debug!("Cache miss: output file {:?} no longer exists", output_file);
+            // Verify output files still exist and have correct hashes
+            if let Some(outputs) = &task_config.outputs {
+                for output_pattern in outputs {
+                    let output_files = self.expand_glob(output_pattern, working_dir)?;
+                    
+                    // Check if we have any expected outputs from cache but no actual files
+                    if output_files.is_empty() && !cached_result.output_hashes.is_empty() {
+                        log::debug!("Cache miss: expected output files for pattern '{}' but found none", output_pattern);
                         return Ok(None);
                     }
+                    
+                    for output_file in output_files {
+                        let relative_path = output_file
+                            .strip_prefix(working_dir)
+                            .unwrap_or(&output_file)
+                            .to_string_lossy()
+                            .to_string();
 
-                    // Check if output file hash matches
-                    if let Some(expected_hash) = cached_result.output_hashes.get(&relative_path) {
-                        let current_hash = self.hash_file(&output_file)?;
-                        if &current_hash != expected_hash {
-                            log::debug!(
-                                "Cache miss: output file {:?} hash changed",
-                                output_file
-                            );
+                        // Check if output file exists
+                        if !output_file.exists() {
+                            log::debug!("Cache miss: output file {:?} no longer exists", output_file);
                             return Ok(None);
+                        }
+
+                        // Check if output file hash matches
+                        if let Some(expected_hash) = cached_result.output_hashes.get(&relative_path) {
+                            let current_hash = self.hash_file(&output_file)?;
+                            if &current_hash != expected_hash {
+                                log::debug!(
+                                    "Cache miss: output file {:?} hash changed",
+                                    output_file
+                                );
+                                return Ok(None);
+                            }
                         }
                     }
                 }
-            }
-            
-            // Additional check: verify all cached output files still exist
-            for (cached_path, _) in &cached_result.output_hashes {
-                let full_path = working_dir.join(cached_path);
-                if !full_path.exists() {
-                    log::debug!("Cache miss: cached output file {:?} no longer exists", full_path);
-                    return Ok(None);
+                
+                // Additional check: verify all cached output files still exist
+                for (cached_path, _) in &cached_result.output_hashes {
+                    let full_path = working_dir.join(cached_path);
+                    if !full_path.exists() {
+                        log::debug!("Cache miss: cached output file {:?} no longer exists", full_path);
+                        return Ok(None);
+                    }
                 }
             }
-        }
 
-        Ok(Some(cached_result))
+            Ok(Some(cached_result))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Save a task execution result to cache
@@ -168,23 +172,21 @@ impl TaskCache {
             return Ok(());
         }
 
-        // Only cache successful executions
-        if exit_code != 0 {
+        // Don't cache if cache is not writable
+        if !self.cache_engine.is_writable() {
             return Ok(());
         }
 
-        // Create cache directory if it doesn't exist
-        if !self.cache_dir.exists() {
-            fs::create_dir_all(&self.cache_dir).map_err(|e| {
-                Error::file_system(self.cache_dir.clone(), "create cache directory", e)
-            })?;
+        // Only cache successful executions
+        if exit_code != 0 {
+            return Ok(());
         }
 
         // Hash output files
         let mut output_hashes = HashMap::new();
         if let Some(outputs) = &task_config.outputs {
             for output_pattern in outputs {
-                let output_files = self.glob_files(output_pattern, working_dir)?;
+                let output_files = self.expand_glob(output_pattern, working_dir)?;
                 for output_file in output_files {
                     let relative_path = output_file
                         .strip_prefix(working_dir)
@@ -204,72 +206,31 @@ impl TaskCache {
             output_hashes,
         };
 
-        let cache_file = self.cache_dir.join(format!("{}.json", cache_key));
-        let cache_content = serde_json::to_string_pretty(&cached_result).map_err(|e| {
-            Error::Json {
-                message: "Failed to serialize cached task result".to_string(),
-                source: e,
-            }
-        })?;
-
-        fs::write(&cache_file, cache_content).map_err(|e| {
-            Error::file_system(cache_file, "write cache file", e)
-        })?;
+        let mut cache_item = self.cache_engine.cache::<CachedTaskResult>(
+            format!("tasks/{}", cache_key)
+        )?;
+        cache_item.data = cached_result;
+        cache_item.save()?;
 
         Ok(())
     }
 
     /// Clear all cached task results
     pub fn clear(&self) -> Result<()> {
-        if self.cache_dir.exists() {
-            fs::remove_dir_all(&self.cache_dir).map_err(|e| {
-                Error::file_system(self.cache_dir.clone(), "remove cache directory", e)
-            })?;
-        }
-        Ok(())
-    }
-
-    /// Hash the content of input files matching a pattern
-    fn hash_input_pattern(&self, pattern: &str, working_dir: &Path) -> Result<String> {
-        let files = self.glob_files(pattern, working_dir)?;
-        let mut hasher = Sha256::new();
-
-        // Sort files for consistent hashing
-        let mut sorted_files = files;
-        sorted_files.sort();
-
-        for file in sorted_files {
-            // Include file path in hash for uniqueness
-            let relative_path = file
-                .strip_prefix(working_dir)
-                .unwrap_or(&file)
-                .to_string_lossy();
-            hasher.update(relative_path.as_bytes());
-
-            // Include file content hash
-            let file_hash = self.hash_file(&file)?;
-            hasher.update(file_hash.as_bytes());
-        }
-
-        let result = hasher.finalize();
-        Ok(format!("{:x}", result))
+        self.cache_engine.clear()
     }
 
     /// Expand a glob pattern to a list of files
-    fn glob_files(&self, pattern: &str, working_dir: &Path) -> Result<Vec<PathBuf>> {
-        // For now, implement simple file matching
-        // TODO: Could use a proper glob library like `glob` crate
+    fn expand_glob(&self, pattern: &str, working_dir: &Path) -> Result<Vec<PathBuf>> {
         let full_pattern = working_dir.join(pattern);
 
         if full_pattern.is_file() {
             Ok(vec![full_pattern])
         } else if full_pattern.is_dir() {
-            // If it's a directory, include all files recursively
             let mut files = Vec::new();
-            Self::collect_files_recursive(&full_pattern, &mut files)?;
+            self.collect_files_recursive(&full_pattern, &mut files)?;
             Ok(files)
         } else {
-            // Try to match as a simple wildcard pattern
             let parent = full_pattern.parent().unwrap_or(working_dir);
             if parent.exists() {
                 let mut files = Vec::new();
@@ -282,8 +243,8 @@ impl TaskCache {
                         Error::file_system(parent.to_path_buf(), "read directory entry", e)
                     })?;
                     let path = entry.path();
+                    
                     if path.is_file() {
-                        // Simple pattern matching - just filename contains pattern
                         if let Some(filename) = path.file_name() {
                             let pattern_name = full_pattern
                                 .file_name()
@@ -302,15 +263,13 @@ impl TaskCache {
                 }
                 Ok(files)
             } else {
-                // If the exact path doesn't exist, check if it's a file that should exist
-                // This handles cases where we're looking for an output file that doesn't exist yet
                 Ok(Vec::new())
             }
         }
     }
 
     /// Recursively collect all files in a directory
-    fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn collect_files_recursive(&self, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         let entries = fs::read_dir(dir).map_err(|e| {
             Error::file_system(dir.to_path_buf(), "read directory", e)
         })?;
@@ -323,7 +282,7 @@ impl TaskCache {
             if path.is_file() {
                 files.push(path);
             } else if path.is_dir() {
-                Self::collect_files_recursive(&path, files)?;
+                self.collect_files_recursive(&path, files)?;
             }
         }
         Ok(())
@@ -331,6 +290,8 @@ impl TaskCache {
 
     /// Calculate SHA256 hash of a file
     fn hash_file(&self, file_path: &Path) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        
         let content = fs::read(file_path).map_err(|e| {
             Error::file_system(file_path.to_path_buf(), "read file for hashing", e)
         })?;
@@ -344,9 +305,11 @@ impl TaskCache {
 
 impl Default for TaskCache {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("Failed to create default task cache")
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -371,7 +334,7 @@ mod tests {
     #[test]
     fn test_cache_key_generation() {
         let temp_dir = TempDir::new().unwrap();
-        let cache = TaskCache::new();
+        let cache = TaskCache::new().unwrap();
         let task_config = create_test_task_config();
 
         // Create some input files
@@ -399,7 +362,7 @@ mod tests {
     #[test]
     fn test_cache_invalidation_on_input_change() {
         let temp_dir = TempDir::new().unwrap();
-        let cache = TaskCache::new();
+        let cache = TaskCache::new().unwrap();
         let task_config = create_test_task_config();
 
         // Create initial input file
@@ -425,7 +388,7 @@ mod tests {
     #[test]
     fn test_custom_cache_key() {
         let temp_dir = TempDir::new().unwrap();
-        let cache = TaskCache::new();
+        let cache = TaskCache::new().unwrap();
         let mut task_config = create_test_task_config();
         task_config.cache_key = Some("custom_key_123".to_string());
 
@@ -440,7 +403,7 @@ mod tests {
     #[test]
     fn test_save_and_retrieve_cache() {
         let temp_dir = TempDir::new().unwrap();
-        let cache = TaskCache::new();
+        let cache = TaskCache::new().unwrap();
         let task_config = create_test_task_config();
 
         // Create test files
@@ -474,7 +437,7 @@ mod tests {
     #[test]
     fn test_cache_miss_on_missing_output() {
         let temp_dir = TempDir::new().unwrap();
-        let cache = TaskCache::new();
+        let cache = TaskCache::new().unwrap();
         let task_config = create_test_task_config();
 
         // Create test files
@@ -508,7 +471,7 @@ mod tests {
     #[test]
     fn test_disabled_cache() {
         let temp_dir = TempDir::new().unwrap();
-        let cache = TaskCache::new();
+        let cache = TaskCache::new().unwrap();
         let mut task_config = create_test_task_config();
         task_config.cache = Some(false);
 
@@ -532,7 +495,7 @@ mod tests {
     #[test]
     fn test_failed_task_not_cached() {
         let temp_dir = TempDir::new().unwrap();
-        let cache = TaskCache::new();
+        let cache = TaskCache::new().unwrap();
         let task_config = create_test_task_config();
 
         let cache_key = cache

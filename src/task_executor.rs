@@ -21,17 +21,15 @@ pub struct TaskExecutionPlan {
 pub struct TaskExecutor {
     env_manager: EnvManager,
     working_dir: PathBuf,
-    task_cache: TaskCache,
 }
 
 impl TaskExecutor {
     /// Create a new task executor
-    pub fn new(env_manager: EnvManager, working_dir: PathBuf) -> Self {
-        Self {
+    pub fn new(env_manager: EnvManager, working_dir: PathBuf) -> Result<Self> {
+        Ok(Self {
             env_manager,
             working_dir,
-            task_cache: TaskCache::new(),
-        }
+        })
     }
 
     /// Execute a single task by name
@@ -68,7 +66,7 @@ impl TaskExecutor {
                 let task_args = args.to_vec();
                 let failed_tasks = Arc::clone(&failed_tasks);
                 let task_name = task_name.clone();
-                let task_cache = TaskCache::new(); // Create cache instance for this task
+                let task_cache = TaskCache::new()?; // Create cache instance for this task
 
                 join_set.spawn(async move {
                     match Self::execute_single_task_with_cache(
@@ -437,7 +435,7 @@ tasks: {
 }"#;
 
         let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let tasks = executor.list_tasks();
         assert_eq!(tasks.len(), 2);
@@ -466,7 +464,7 @@ tasks: {
 }"#;
 
         let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let plan = executor
             .build_execution_plan(&["build".to_string()])
@@ -496,7 +494,7 @@ tasks: {
 }"#;
 
         let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["task1".to_string()]);
         assert!(result.is_err());
@@ -519,7 +517,7 @@ tasks: {
 }"#;
 
         let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["nonexistent".to_string()]);
         assert!(result.is_err());
@@ -540,7 +538,7 @@ tasks: {
 }"#;
 
         let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["build".to_string()]);
         assert!(result.is_err());
@@ -572,7 +570,7 @@ tasks: {
 }"#;
 
         let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
-        let executor = TaskExecutor::new(manager, PathBuf::from("."));
+        let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let plan = executor
             .build_execution_plan(&["deploy".to_string()])

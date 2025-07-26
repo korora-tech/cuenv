@@ -261,7 +261,7 @@ fn main() -> Result<()> {
                     // Check if this is a defined task first
                     if env_manager.get_task(&name).is_some() {
                         // Execute the specified task
-                        let executor = TaskExecutor::new(env_manager, current_dir);
+                        let executor = TaskExecutor::new(env_manager, current_dir)?;
                         let rt = tokio::runtime::Runtime::new().map_err(|e| {
                             Error::configuration(format!("Failed to create async runtime: {e}"))
                         })?;
@@ -498,7 +498,7 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::ClearCache) => {
-            let task_cache = cuenv::task_cache::TaskCache::new();
+            let task_cache = cuenv::task_cache::TaskCache::new()?;
             match task_cache.clear() {
                 Ok(()) => println!("✓ Task cache cleared"),
                 Err(e) => {

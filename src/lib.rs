@@ -4,6 +4,7 @@ pub mod async_runtime;
 pub mod cache;
 pub mod command_executor;
 pub mod constants;
+pub mod cue_cache;
 pub mod cue_parser;
 pub mod directory;
 pub mod env_diff;

@@ -43,6 +43,10 @@ base64 = "0.22"
 flate2 = "1.0"
 sha2 = "0.10"
 rand = "0.8"
+# Moon cache system for robust build caching
+miette = "7.4"
+tracing = "0.1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Linux-only dependencies for access restrictions
 [target.'cfg(target_os = "linux")'.dependencies]
