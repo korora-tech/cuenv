@@ -59,6 +59,18 @@ pub enum Error {
 
     /// Unsupported operation errors
     Unsupported { feature: String, message: String },
+
+    /// Security validation errors
+    Security { message: String },
+
+    /// Network-related errors
+    Network { endpoint: String, message: String },
+
+    /// Operation timeout errors
+    Timeout {
+        operation: String,
+        duration: std::time::Duration,
+    },
 }
 
 impl fmt::Display for Error {
@@ -137,6 +149,22 @@ impl fmt::Display for Error {
             }
             Error::Unsupported { feature, message } => {
                 write!(f, "unsupported feature '{feature}': {message}")
+            }
+            Error::Security { message } => {
+                write!(f, "security validation error: {message}")
+            }
+            Error::Network { endpoint, message } => {
+                write!(f, "network error for '{}': {}", endpoint, message)
+            }
+            Error::Timeout {
+                operation,
+                duration,
+            } => {
+                write!(
+                    f,
+                    "operation '{}' timed out after {:?}",
+                    operation, duration
+                )
             }
         }
     }
@@ -294,6 +322,32 @@ impl Error {
         Error::Unsupported {
             feature: feature.into(),
             message: message.into(),
+        }
+    }
+
+    /// Create a security validation error
+    #[must_use]
+    pub fn security(message: impl Into<String>) -> Self {
+        Error::Security {
+            message: message.into(),
+        }
+    }
+
+    /// Create a network error
+    #[must_use]
+    pub fn network(endpoint: impl Into<String>, message: impl Into<String>) -> Self {
+        Error::Network {
+            endpoint: endpoint.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Create a timeout error
+    #[must_use]
+    pub fn timeout(operation: impl Into<String>, duration: std::time::Duration) -> Self {
+        Error::Timeout {
+            operation: operation.into(),
+            duration,
         }
     }
 }

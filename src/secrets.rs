@@ -1,5 +1,8 @@
+use crate::audit::{audit_logger, AuditLogger};
 use crate::command_executor::{CommandExecutor, CommandExecutorFactory};
 use crate::errors::{Error, Result};
+use crate::rate_limit::RateLimitManager;
+use crate::resilience::{retry, CircuitBreaker, CircuitBreakerConfig, RetryConfig};
 use crate::types::{CommandArguments, EnvironmentVariables, SecretValues};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,6 +28,14 @@ pub struct CommandResolver {
     approval_shown: Arc<Mutex<bool>>,
     // Command executor for running external commands
     executor: Box<dyn CommandExecutor>,
+    // Retry configuration for transient failures
+    retry_config: RetryConfig,
+    // Circuit breaker for external commands
+    circuit_breaker: Arc<CircuitBreaker>,
+    // Rate limiter for secret resolution
+    rate_limiter: Option<Arc<RateLimitManager>>,
+    // Audit logger
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl CommandResolver {
@@ -33,11 +44,30 @@ impl CommandResolver {
     }
 
     pub fn with_executor(max_concurrent: usize, executor: Box<dyn CommandExecutor>) -> Self {
+        let retry_config = RetryConfig::for_network();
+        let circuit_breaker_config = CircuitBreakerConfig {
+            failure_threshold: 5,
+            success_threshold: 2,
+            timeout: std::time::Duration::from_secs(300), // 5 minutes
+            break_duration: std::time::Duration::from_secs(60), // 1 minute
+            half_open_max_calls: 3,
+        };
+
         Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             approval_shown: Arc::new(Mutex::new(false)),
             executor,
+            retry_config,
+            circuit_breaker: Arc::new(CircuitBreaker::new(circuit_breaker_config)),
+            rate_limiter: None,
+            audit_logger: audit_logger(),
         }
+    }
+
+    /// Set the rate limiter for secret resolution
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimitManager>) -> Self {
+        self.rate_limiter = Some(rate_limiter);
+        self
     }
 
     async fn ensure_approval(&self) -> Result<()> {
@@ -70,35 +100,44 @@ impl CommandResolver {
             }
         };
 
-        let args = CommandArguments::from_vec(config.args.clone());
-        let output = match self.executor.execute(&config.cmd, &args).await {
-            Ok(output) => output,
-            Err(e) => {
-                return Err(Error::command_execution(
-                    &config.cmd,
-                    config.args.clone(),
-                    format!("failed to execute command: {e}"),
-                    None,
-                ));
-            }
-        };
+        // Execute with retry and circuit breaker
+        let cmd = config.cmd.clone();
+        let args = config.args.clone();
+        let executor = &self.executor;
+        let circuit_breaker = &self.circuit_breaker;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::command_execution(
-                &config.cmd,
-                config.args.clone(),
-                format!("command failed: {stderr}"),
-                output.status.code(),
-            ));
-        }
+        retry(&self.retry_config, || {
+            let cmd = cmd.clone();
+            let args = args.clone();
+            circuit_breaker.call(|| async move {
+                let command_args = CommandArguments::from_vec(args.clone());
+                let output = executor.execute(&cmd, &command_args).await.map_err(|e| {
+                    Error::command_execution(
+                        &cmd,
+                        args.clone(),
+                        format!("failed to execute command: {e}"),
+                        None,
+                    )
+                })?;
 
-        match String::from_utf8(output.stdout) {
-            Ok(s) => Ok(s.trim().to_string()),
-            Err(e) => Err(Error::configuration(format!(
-                "command output is not valid UTF-8: {e}"
-            ))),
-        }
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(Error::command_execution(
+                        &cmd,
+                        args.clone(),
+                        format!("command failed: {stderr}"),
+                        output.status.code(),
+                    ));
+                }
+
+                String::from_utf8(output.stdout)
+                    .map(|s| s.trim().to_string())
+                    .map_err(|e| {
+                        Error::configuration(format!("command output is not valid UTF-8: {e}"))
+                    })
+            })
+        })
+        .await
     }
 }
 
@@ -106,13 +145,44 @@ impl CommandResolver {
 impl SecretResolver for CommandResolver {
     async fn resolve(&self, reference: &str) -> Result<Option<String>> {
         if let Some(config) = Self::parse_resolver_reference(reference) {
+            // Check rate limit if configured
+            let _rate_limit_permit = if let Some(ref rate_limiter) = self.rate_limiter {
+                match rate_limiter.try_acquire("secrets").await {
+                    Ok(Some(permit)) => Some(permit),
+                    Ok(None) => None,
+                    Err(e) => {
+                        // Log rate limit exceeded
+                        if let Some(ref logger) = self.audit_logger {
+                            let _ = logger.log_rate_limit("secrets", 0, 0, true).await;
+                        }
+                        return Err(Error::configuration(format!("Rate limit exceeded: {}", e)));
+                    }
+                }
+            } else {
+                None
+            };
+
             // Ensure we've shown approval message on first resolution
             match self.ensure_approval().await {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
 
-            match self.execute_resolver(&config).await {
+            let result = self.execute_resolver(&config).await;
+
+            // Log the secret resolution attempt
+            if let Some(ref logger) = self.audit_logger {
+                let _ = logger
+                    .log_secret_resolution(
+                        &reference[0..20.min(reference.len())], // Truncate for security
+                        "command",
+                        result.is_ok(),
+                        result.as_ref().err().map(|e| e.to_string()),
+                    )
+                    .await;
+            }
+
+            match result {
                 Ok(result) => Ok(Some(result)),
                 Err(e) => Err(e),
             }

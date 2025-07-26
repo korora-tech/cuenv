@@ -1,8 +1,10 @@
+use crate::cleanup::TempFileGuard;
 use crate::cue_parser::ParseResult;
 use crate::retry::{retry_blocking, RetryConfig};
 use crate::xdg::XdgPaths;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -74,12 +76,27 @@ impl CueCache {
             mtime: source_mtime,
         };
 
-        // Serialize and save with retry
+        // Serialize cache content
         let cache_content = serde_json::to_string(&cached)?;
+
+        // Write to a temporary file first to ensure atomicity
+        let temp_file_path = cache_file.with_extension("tmp");
+        let temp_guard = TempFileGuard::new(temp_file_path.clone());
+
+        // Write content to temporary file with retry
         retry_blocking(RetryConfig::fast(), || {
-            fs::write(&cache_file, &cache_content)
+            let mut file = fs::File::create(temp_guard.path())?;
+            file.write_all(cache_content.as_bytes())?;
+            file.sync_all()?; // Ensure data is flushed to disk
+            Ok::<(), std::io::Error>(())
         })
         .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        // Atomically rename temporary file to final location
+        fs::rename(temp_guard.path(), &cache_file)?;
+
+        // Keep the temporary file since we renamed it
+        temp_guard.keep();
 
         Ok(())
     }

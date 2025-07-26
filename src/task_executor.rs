@@ -1,11 +1,14 @@
+use crate::cleanup::ProcessGuard;
 use crate::cue_parser::TaskConfig;
 use crate::env_manager::EnvManager;
 use crate::errors::{Error, Result};
+use crate::security::SecurityValidator;
 use crate::task_cache::TaskCache;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::task::JoinSet;
 
 /// Represents a task execution plan with resolved dependencies
@@ -347,16 +350,42 @@ impl TaskExecutor {
             }
         };
 
+        // Validate shell command for security
+        let allowed_shells = {
+            let mut shells = HashSet::new();
+            shells.insert("sh".to_string());
+            shells.insert("bash".to_string());
+            shells.insert("zsh".to_string());
+            shells.insert("fish".to_string());
+            shells.insert("pwsh".to_string());
+            shells.insert("powershell".to_string());
+            shells
+        };
+
+        SecurityValidator::validate_command(&shell, &allowed_shells)?;
+
+        // Validate script content for dangerous patterns
+        SecurityValidator::validate_shell_expansion(&script_content)?;
+
+        // Validate user arguments
+        if !args.is_empty() {
+            SecurityValidator::validate_command_args(args)?;
+        }
+
         // Determine working directory
         let exec_dir = if let Some(task_wd) = &task_config.working_dir {
             let mut dir = working_dir.to_path_buf();
             dir.push(task_wd);
+
+            // Validate the working directory path
+            SecurityValidator::validate_path(&dir, &[working_dir.to_path_buf()])?;
+
             dir
         } else {
             working_dir.to_path_buf()
         };
 
-        // Execute the task
+        // Configure process group for better cleanup
         let mut cmd = Command::new(&shell);
         cmd.arg("-c")
             .arg(&script_content)
@@ -364,6 +393,27 @@ impl TaskExecutor {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+
+        // On Unix, create a new process group for better cleanup
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+
+            // Apply resource limits before spawning
+            unsafe {
+                cmd.pre_exec(|| {
+                    use crate::resource_limits::apply_default_limits;
+                    match apply_default_limits() {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            eprintln!("Warning: Failed to apply resource limits: {}", e);
+                            Ok(()) // Continue anyway
+                        }
+                    }
+                });
+            }
+        }
 
         // Apply security restrictions if configured
         if let Some(security) = &task_config.security {
@@ -383,16 +433,35 @@ impl TaskExecutor {
             }
         }
 
-        let output = cmd.output().map_err(|e| {
+        // Spawn the process with timeout
+        let child = cmd.spawn().map_err(|e| {
             Error::command_execution(
                 &shell,
                 vec!["-c".to_string(), script_content.clone()],
-                format!("Failed to execute task: {e}"),
+                format!("Failed to spawn task: {e}"),
                 None,
             )
         })?;
 
-        Ok(output.status.code().unwrap_or(1))
+        // Use ProcessGuard for automatic cleanup
+        let timeout = match task_config.timeout {
+            Some(timeout_secs) => Duration::from_secs(timeout_secs as u64),
+            None => Duration::from_secs(3600), // Default 1 hour timeout
+        };
+
+        let mut guard = ProcessGuard::new(child, timeout);
+
+        // Wait for completion with timeout
+        let status = guard.wait_with_timeout().map_err(|e| {
+            Error::command_execution(
+                &shell,
+                vec!["-c".to_string(), script_content.clone()],
+                e.to_string(),
+                None,
+            )
+        })?;
+
+        Ok(status.code().unwrap_or(1))
     }
 
     /// List all available tasks

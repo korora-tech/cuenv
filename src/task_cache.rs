@@ -335,6 +335,7 @@ mod tests {
             outputs: Some(vec!["build/output.txt".to_string()]),
             cache: Some(true),
             cache_key: None,
+            timeout: None,
         }
     }
 

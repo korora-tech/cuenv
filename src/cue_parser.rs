@@ -1,10 +1,67 @@
 use crate::constants::ENV_PACKAGE_NAME;
 use crate::errors::{Error, Result};
+use crate::resilience::suggest_recovery;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
+
+/// RAII wrapper for C strings returned from FFI
+/// Ensures proper cleanup when the wrapper goes out of scope
+struct CStringPtr {
+    ptr: *mut c_char,
+}
+
+impl CStringPtr {
+    /// Creates a new wrapper from a raw pointer
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - `ptr` is either null or a valid pointer returned from the FFI
+    /// - The pointer has not been freed already
+    /// - The pointer will not be used after this wrapper is dropped
+    unsafe fn new(ptr: *mut c_char) -> Self {
+        Self { ptr }
+    }
+
+    /// Checks if the wrapped pointer is null
+    fn is_null(&self) -> bool {
+        self.ptr.is_null()
+    }
+
+    /// Converts the C string to a Rust &str
+    ///
+    /// # Safety
+    /// The caller must ensure that the wrapped pointer is not null
+    unsafe fn to_str(&self) -> Result<&str> {
+        debug_assert!(
+            !self.is_null(),
+            "Attempted to convert null pointer to string"
+        );
+
+        let cstr = CStr::from_ptr(self.ptr);
+        cstr.to_str().map_err(|e| {
+            Error::ffi(
+                "cue_eval_package",
+                format!("failed to convert C string to UTF-8: {}", e),
+            )
+        })
+    }
+}
+
+impl Drop for CStringPtr {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            // Safety: We only call cue_free_string on non-null pointers that were
+            // returned from cue_eval_package. The FFI contract guarantees that
+            // this is safe to call exactly once per returned pointer.
+            unsafe {
+                cue_free_string(self.ptr);
+            }
+        }
+    }
+}
 
 #[link(name = "cue_bridge")]
 extern "C" {
@@ -58,6 +115,8 @@ pub struct TaskConfig {
     /// Custom cache key - if not provided, will be derived from inputs
     #[serde(rename = "cacheKey")]
     pub cache_key: Option<String>,
+    /// Timeout for task execution in seconds
+    pub timeout: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,49 +209,60 @@ impl CueParser {
         package_name: &str,
         options: &ParseOptions,
     ) -> Result<ParseResult> {
+        // Validate inputs before FFI calls
+        if package_name.is_empty() {
+            return Err(Error::configuration(
+                "Package name cannot be empty".to_string(),
+            ));
+        }
+
         // Only allow loading the "env" package
         if package_name != ENV_PACKAGE_NAME {
             return Err(Error::configuration(format!(
                 "Only 'env' package is supported, got '{package_name}'. Please ensure your .cue files use 'package env'"
             )));
         }
-        let c_dir = match CString::new(dir.to_string_lossy().as_ref()) {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(Error::ffi(
-                    "cue_eval_package",
-                    format!("failed to create C string from directory path: {e}"),
-                ));
-            }
-        };
 
-        let c_package = match CString::new(package_name) {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(Error::ffi(
-                    "cue_eval_package",
-                    format!("failed to create C string from package name: {e}"),
-                ));
-            }
-        };
+        // Validate directory path
+        let dir_str = dir.to_string_lossy();
+        if dir_str.is_empty() {
+            return Err(Error::configuration(
+                "Directory path cannot be empty".to_string(),
+            ));
+        }
 
+        // Create C strings for FFI
+        let c_dir = CString::new(dir_str.as_ref()).map_err(|e| {
+            Error::ffi(
+                "cue_eval_package",
+                format!("invalid directory path - contains null byte: {}", e),
+            )
+        })?;
+
+        let c_package = CString::new(package_name).map_err(|e| {
+            Error::ffi(
+                "cue_eval_package",
+                format!("invalid package name - contains null byte: {}", e),
+            )
+        })?;
+
+        // Safety: cue_eval_package is an external C function that:
+        // - Takes two non-null C string pointers as arguments
+        // - Returns a heap-allocated C string that must be freed with cue_free_string
+        // - Returns null on allocation failure
+        // We ensure the input pointers are valid for the duration of the call
         let result_ptr = unsafe { cue_eval_package(c_dir.as_ptr(), c_package.as_ptr()) };
 
-        if result_ptr.is_null() {
+        // Wrap the result pointer for automatic cleanup
+        // Safety: result_ptr is either null or a valid pointer returned from cue_eval_package
+        let result_wrapper = unsafe { CStringPtr::new(result_ptr) };
+
+        if result_wrapper.is_null() {
             return Err(Error::cue_parse(dir, "CUE parser returned null pointer"));
         }
 
-        let result_cstr = unsafe { CStr::from_ptr(result_ptr) };
-        let result_str = match result_cstr.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                unsafe { cue_free_string(result_ptr) };
-                return Err(Error::ffi(
-                    "cue_eval_package",
-                    format!("failed to convert C string to Rust string: {e}"),
-                ));
-            }
-        };
+        // Safety: We've verified the pointer is not null
+        let result_str = unsafe { result_wrapper.to_str()? };
 
         let parse_result = if result_str.is_empty() {
             ParseResult {
@@ -203,49 +273,57 @@ impl CueParser {
             }
         } else {
             // Parse JSON result
-            let json_value: serde_json::Value = match serde_json::from_str(result_str) {
-                Ok(v) => v,
-                Err(e) => {
-                    unsafe { cue_free_string(result_ptr) };
-                    return Err(Error::Json {
-                        message: "failed to parse JSON result from CUE parser".to_string(),
-                        source: e,
-                    });
-                }
-            };
+            let json_value: serde_json::Value = serde_json::from_str(result_str).map_err(|e| {
+                let error = Error::Json {
+                    message: "failed to parse JSON result from CUE parser".to_string(),
+                    source: e,
+                };
+                log::error!("CUE parser returned invalid JSON: {}", result_str);
+                log::error!("Recovery suggestion: {}", suggest_recovery(&error));
+                error
+            })?;
 
             // Check if it's an error response
             if let serde_json::Value::Object(ref map) = json_value {
                 if let Some(serde_json::Value::String(error)) = map.get("error") {
-                    unsafe { cue_free_string(result_ptr) };
-                    return Err(Error::cue_parse(dir, error.clone()));
+                    let cue_error = Error::cue_parse(dir, error.clone());
+
+                    // Provide specific recovery suggestions based on error content
+                    let recovery_hint = if error.contains("cannot find package") {
+                        "Ensure your .cue files have 'package env' at the top"
+                    } else if error.contains("expected") || error.contains("syntax") {
+                        "Check for missing commas, brackets, or quotes in your CUE file"
+                    } else if error.contains("cycle") {
+                        "You have a circular dependency in your CUE definitions"
+                    } else if error.contains("incomplete") {
+                        "Some required fields are missing in your CUE configuration"
+                    } else {
+                        "Run 'cue vet' on your files to check for syntax errors"
+                    };
+
+                    log::error!("CUE parsing error: {}", error);
+                    log::error!("Recovery suggestion: {}", recovery_hint);
+                    return Err(cue_error);
                 }
             }
 
             // Deserialize into structured result
-            let cue_result: CueParseResult = match serde_json::from_value(json_value) {
-                Ok(r) => r,
-                Err(e) => {
-                    unsafe { cue_free_string(result_ptr) };
-                    return Err(Error::Json {
-                        message: "failed to parse CUE result structure".to_string(),
-                        source: e,
-                    });
-                }
-            };
+            let cue_result: CueParseResult = serde_json::from_value(json_value).map_err(|e| {
+                let error = Error::Json {
+                    message: "failed to parse CUE result structure".to_string(),
+                    source: e,
+                };
+                log::error!(
+                    "Failed to deserialize CUE result. This might indicate a version mismatch."
+                );
+                log::error!("Recovery suggestion: {}", suggest_recovery(&error));
+                error
+            })?;
 
-            match Self::build_parse_result(cue_result, options) {
-                Ok(r) => r,
-                Err(e) => {
-                    unsafe { cue_free_string(result_ptr) };
-                    return Err(e);
-                }
-            }
+            Self::build_parse_result(cue_result, options)?
         };
 
-        // Free the C string
-        unsafe { cue_free_string(result_ptr) };
-
+        // The CStringPtr will be automatically freed when it goes out of scope
         Ok(parse_result)
     }
 
