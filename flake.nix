@@ -201,9 +201,95 @@
             cuenv = cuenv;
           };
 
-          # Make treefmt available as a check
+          # Comprehensive checks for nix flake check
           checks = {
+            # Formatting check
             formatting = treefmt.config.build.check self;
+
+            # Build check - ensure the package builds
+            build = cuenv;
+
+            # Clippy check
+            clippy = pkgs.rustPlatform.buildRustPackage {
+              pname = "cuenv-clippy";
+              version = version;
+              src = ./.;
+
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+              };
+
+              preBuild = ''
+                export HOME=$(mktemp -d)
+                export GOPATH="$HOME/go"
+                export GOCACHE="$HOME/go-cache"
+                export CGO_ENABLED=1
+                
+                # Copy vendored dependencies
+                cp -r ${goVendor}/vendor libcue-bridge/
+                chmod -R u+w libcue-bridge
+              '';
+
+              inherit buildInputs nativeBuildInputs;
+
+              RUSTFLAGS =
+                if pkgs.stdenv.isDarwin then
+                  "-C link-arg=-framework -C link-arg=Security -C link-arg=-framework -C link-arg=CoreFoundation"
+                else
+                  "";
+
+              CGO_ENABLED = "1";
+              GO = "${pkgs.go_1_24}/bin/go";
+
+              buildPhase = ''
+                cargo clippy --all-targets --all-features -- -D warnings
+              '';
+
+              installPhase = ''
+                touch $out
+              '';
+            };
+
+            # Test check
+            tests = pkgs.rustPlatform.buildRustPackage {
+              pname = "cuenv-tests";
+              version = version;
+              src = ./.;
+
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+              };
+
+              preBuild = ''
+                export HOME=$(mktemp -d)
+                export GOPATH="$HOME/go"
+                export GOCACHE="$HOME/go-cache"
+                export CGO_ENABLED=1
+                
+                # Copy vendored dependencies
+                cp -r ${goVendor}/vendor libcue-bridge/
+                chmod -R u+w libcue-bridge
+              '';
+
+              inherit buildInputs nativeBuildInputs;
+
+              RUSTFLAGS =
+                if pkgs.stdenv.isDarwin then
+                  "-C link-arg=-framework -C link-arg=Security -C link-arg=-framework -C link-arg=CoreFoundation"
+                else
+                  "";
+
+              CGO_ENABLED = "1";
+              GO = "${pkgs.go_1_24}/bin/go";
+
+              checkPhase = ''
+                cargo test --offline
+              '';
+
+              installPhase = ''
+                touch $out
+              '';
+            };
           };
 
           # Make formatter available
