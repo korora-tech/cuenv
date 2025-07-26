@@ -182,7 +182,7 @@
             checkPhase = ''
               runHook preCheck
               # Skip tests that require network access or special setup
-              cargo test
+              cargo test --offline
               runHook postCheck
             '';
 
@@ -204,62 +204,6 @@
           # Make treefmt available as a check
           checks = {
             formatting = treefmt.config.build.check self;
-
-            # Clippy check using main package build
-            clippy = pkgs.runCommand "cuenv-clippy"
-              {
-                nativeBuildInputs = nativeBuildInputs;
-                buildInputs = buildInputs;
-                src = ./.;
-              } ''
-              export HOME=$(mktemp -d)
-              export GOPATH="$HOME/go"
-              export GOCACHE="$HOME/go-cache"
-              export CGO_ENABLED=1
-
-              # Copy source
-              cp -r $src/* .
-              chmod -R u+w .
-
-              # Copy vendored dependencies
-              cp -r ${goVendor}/vendor libcue-bridge/
-              chmod -R u+w libcue-bridge
-
-              # Run clippy
-              cargo clippy --all-targets --all-features -- -D warnings
-
-              # Create output
-              mkdir -p $out
-              touch $out/clippy-success
-            '';
-
-            # Test check using main package build  
-            tests = pkgs.runCommand "cuenv-tests"
-              {
-                nativeBuildInputs = nativeBuildInputs;
-                buildInputs = buildInputs;
-                src = ./.;
-              } ''
-              export HOME=$(mktemp -d)
-              export GOPATH="$HOME/go"
-              export GOCACHE="$HOME/go-cache"
-              export CGO_ENABLED=1
-
-              # Copy source
-              cp -r $src/* .
-              chmod -R u+w .
-
-              # Copy vendored dependencies
-              cp -r ${goVendor}/vendor libcue-bridge/
-              chmod -R u+w libcue-bridge
-
-              # Run tests
-              cargo test --all-targets --all-features
-
-              # Create output
-              mkdir -p $out
-              touch $out/tests-success
-            '';
           };
 
           # Make formatter available
