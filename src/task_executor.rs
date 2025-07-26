@@ -476,18 +476,18 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn create_test_env_manager_with_tasks(tasks_cue: &str) -> (EnvManager, TempDir) {
+    async fn create_test_env_manager_with_tasks(tasks_cue: &str) -> (EnvManager, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let env_file = temp_dir.path().join("env.cue");
         fs::write(&env_file, tasks_cue).unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load_env(temp_dir.path()).unwrap();
+        manager.load_env(temp_dir.path()).await.unwrap();
         (manager, temp_dir)
     }
 
-    #[test]
-    fn test_simple_task_discovery() {
+    #[tokio::test]
+    async fn test_simple_task_discovery() {
         let tasks_cue = r#"package env
 
 env: {
@@ -505,7 +505,7 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
         let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let tasks = executor.list_tasks();
@@ -516,8 +516,8 @@ tasks: {
         assert!(task_names.contains(&&"test".to_string()));
     }
 
-    #[test]
-    fn test_task_dependency_resolution() {
+    #[tokio::test]
+    async fn test_task_dependency_resolution() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -534,7 +534,7 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
         let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let plan = executor
@@ -547,8 +547,8 @@ tasks: {
         assert_eq!(plan.levels[1], vec!["build"]);
     }
 
-    #[test]
-    fn test_circular_dependency_detection() {
+    #[tokio::test]
+    async fn test_circular_dependency_detection() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -564,7 +564,7 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
         let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["task1".to_string()]);
@@ -575,8 +575,8 @@ tasks: {
             .contains("Circular dependency"));
     }
 
-    #[test]
-    fn test_missing_task_error() {
+    #[tokio::test]
+    async fn test_missing_task_error() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -587,7 +587,7 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
         let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["nonexistent".to_string()]);
@@ -595,8 +595,8 @@ tasks: {
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[test]
-    fn test_missing_dependency_error() {
+    #[tokio::test]
+    async fn test_missing_dependency_error() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -608,7 +608,7 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
         let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let result = executor.build_execution_plan(&["build".to_string()]);
@@ -616,8 +616,8 @@ tasks: {
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[test]
-    fn test_complex_dependency_graph() {
+    #[tokio::test]
+    async fn test_complex_dependency_graph() {
         let tasks_cue = r#"package env
 
 env: {}
@@ -640,7 +640,7 @@ tasks: {
     }
 }"#;
 
-        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue);
+        let (manager, _temp_dir) = create_test_env_manager_with_tasks(tasks_cue).await;
         let executor = TaskExecutor::new(manager, PathBuf::from(".")).unwrap();
 
         let plan = executor

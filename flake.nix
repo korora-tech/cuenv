@@ -209,87 +209,38 @@
             # Build check - ensure the package builds
             build = cuenv;
 
-            # Clippy check
-            clippy = pkgs.rustPlatform.buildRustPackage {
+            # Clippy check - just run clippy during the main build
+            clippy = cuenv.overrideAttrs (oldAttrs: {
               pname = "cuenv-clippy";
-              version = version;
-              src = ./.;
-
-              cargoLock = {
-                lockFile = ./Cargo.lock;
-              };
-
-              preBuild = ''
-                export HOME=$(mktemp -d)
-                export GOPATH="$HOME/go"
-                export GOCACHE="$HOME/go-cache"
-                export CGO_ENABLED=1
-                
-                # Copy vendored dependencies
-                cp -r ${goVendor}/vendor libcue-bridge/
-                chmod -R u+w libcue-bridge
-              '';
-
-              inherit buildInputs nativeBuildInputs;
-
-              RUSTFLAGS =
-                if pkgs.stdenv.isDarwin then
-                  "-C link-arg=-framework -C link-arg=Security -C link-arg=-framework -C link-arg=CoreFoundation"
-                else
-                  "";
-
-              CGO_ENABLED = "1";
-              GO = "${pkgs.go_1_24}/bin/go";
-
               buildPhase = ''
+                runHook preBuild
+                # Run clippy instead of normal build
                 cargo clippy --all-targets --all-features -- -D warnings
+                runHook postBuild
               '';
 
               installPhase = ''
                 touch $out
               '';
-            };
 
-            # Test check
-            tests = pkgs.rustPlatform.buildRustPackage {
+              doCheck = false;
+            });
+
+            # Test check - use the main derivation but run tests
+            tests = cuenv.overrideAttrs (oldAttrs: {
               pname = "cuenv-tests";
-              version = version;
-              src = ./.;
-
-              cargoLock = {
-                lockFile = ./Cargo.lock;
-              };
-
-              preBuild = ''
-                export HOME=$(mktemp -d)
-                export GOPATH="$HOME/go"
-                export GOCACHE="$HOME/go-cache"
-                export CGO_ENABLED=1
-                
-                # Copy vendored dependencies
-                cp -r ${goVendor}/vendor libcue-bridge/
-                chmod -R u+w libcue-bridge
-              '';
-
-              inherit buildInputs nativeBuildInputs;
-
-              RUSTFLAGS =
-                if pkgs.stdenv.isDarwin then
-                  "-C link-arg=-framework -C link-arg=Security -C link-arg=-framework -C link-arg=CoreFoundation"
-                else
-                  "";
-
-              CGO_ENABLED = "1";
-              GO = "${pkgs.go_1_24}/bin/go";
-
-              checkPhase = ''
-                cargo test --offline
+              doCheck = true;
+              buildPhase = ''
+                runHook preBuild
+                # Just build without installing, tests will run in checkPhase
+                cargo build --all-targets
+                runHook postBuild
               '';
 
               installPhase = ''
                 touch $out
               '';
-            };
+            });
           };
 
           # Make formatter available

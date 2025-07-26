@@ -628,7 +628,7 @@ mod tests {
 
         // Open the circuit
         for _ in 0..2 {
-            let _ = cb
+            let _: Result<()> = cb
                 .call(|| async { Err(Error::network("test", "fail")) })
                 .await;
         }
@@ -659,7 +659,7 @@ mod tests {
 
         // Open the circuit
         for _ in 0..2 {
-            let _ = cb
+            let _: Result<()> = cb
                 .call(|| async { Err(Error::network("test", "fail")) })
                 .await;
         }
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(cb.state().await, CircuitState::HalfOpen);
 
         // Failure in half-open should reopen
-        let _ = cb
+        let _: Result<()> = cb
             .call(|| async { Err(Error::network("test", "fail")) })
             .await;
 
@@ -697,7 +697,7 @@ mod tests {
 
         // First, cause circuit to open
         for _ in 0..3 {
-            let _ = retry_with_circuit_breaker(&retry_config, &cb, || {
+            let _: Result<()> = retry_with_circuit_breaker(&retry_config, &cb, || {
                 counter.fetch_add(1, Ordering::SeqCst);
                 async { Err(Error::network("test", "fail")) }
             })

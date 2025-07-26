@@ -145,7 +145,7 @@ mod tests {
         let limits = ResourceLimits::default()
             .with_cpu_time(1800, 3600) // 30 min soft, 1 hour hard
             .with_memory(2 * 1024 * 1024 * 1024, 4 * 1024 * 1024 * 1024); // 2GB soft, 4GB hard
-        
+
         let _ = apply_limits(&limits);
     }
 

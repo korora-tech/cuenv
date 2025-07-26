@@ -30,9 +30,12 @@ pub struct SyncEnv;
 impl SyncEnv {
     /// Set an environment variable with thread safety
     pub fn set_var<K: AsRef<str>, V: AsRef<str>>(key: K, value: V) -> Result<()> {
-        let _guard = ENV_MUTEX
-            .lock()
-            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
+        let _guard = ENV_MUTEX.lock().map_err(|e| {
+            Error::environment(
+                "ENV_MUTEX",
+                format!("Failed to acquire environment lock: {}", e),
+            )
+        })?;
 
         env::set_var(key.as_ref(), value.as_ref());
         Ok(())
@@ -40,18 +43,24 @@ impl SyncEnv {
 
     /// Get an environment variable with thread safety
     pub fn var<K: AsRef<str>>(key: K) -> Result<Option<String>> {
-        let _guard = ENV_MUTEX
-            .lock()
-            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
+        let _guard = ENV_MUTEX.lock().map_err(|e| {
+            Error::environment(
+                "ENV_MUTEX",
+                format!("Failed to acquire environment lock: {}", e),
+            )
+        })?;
 
         Ok(env::var(key.as_ref()).ok())
     }
 
     /// Remove an environment variable with thread safety
     pub fn remove_var<K: AsRef<str>>(key: K) -> Result<()> {
-        let _guard = ENV_MUTEX
-            .lock()
-            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
+        let _guard = ENV_MUTEX.lock().map_err(|e| {
+            Error::environment(
+                "ENV_MUTEX",
+                format!("Failed to acquire environment lock: {}", e),
+            )
+        })?;
 
         env::remove_var(key.as_ref());
         Ok(())
@@ -59,9 +68,12 @@ impl SyncEnv {
 
     /// Get all environment variables with thread safety
     pub fn vars() -> Result<Vec<(String, String)>> {
-        let _guard = ENV_MUTEX
-            .lock()
-            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
+        let _guard = ENV_MUTEX.lock().map_err(|e| {
+            Error::environment(
+                "ENV_MUTEX",
+                format!("Failed to acquire environment lock: {}", e),
+            )
+        })?;
 
         Ok(env::vars().collect())
     }

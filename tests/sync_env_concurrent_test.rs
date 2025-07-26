@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod concurrent_tests {
-    use crate::sync_env::{InstanceLock, SyncEnv};
+    use cuenv::sync_env::{InstanceLock, SyncEnv};
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::Duration;

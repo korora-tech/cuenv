@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::command_executor::CommandExecutorFactory;
-    use crate::errors::Error;
-    use crate::resilience::*;
-    use crate::secrets::{CommandResolver, SecretResolver};
+    use cuenv::command_executor::CommandExecutorFactory;
+    use cuenv::errors::Error;
+    use cuenv::resilience::*;
+    use cuenv::secrets::{CommandResolver, SecretResolver};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;

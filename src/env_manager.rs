@@ -893,8 +893,8 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_load_and_unload_env() {
+    #[tokio::test]
+    async fn test_load_and_unload_env() {
         let temp_dir = TempDir::new().unwrap();
         let env_file = temp_dir.path().join("env.cue");
         fs::write(
@@ -910,7 +910,7 @@ env: {
         let original_value = SyncEnv::var("CUENV_TEST_VAR_UNIQUE").unwrap_or_default();
 
         let mut manager = EnvManager::new();
-        manager.load_env(temp_dir.path()).unwrap();
+        manager.load_env(temp_dir.path()).await.unwrap();
 
         assert_eq!(
             SyncEnv::var("CUENV_TEST_VAR_UNIQUE").unwrap(),
@@ -925,8 +925,8 @@ env: {
         }
     }
 
-    #[test]
-    fn test_run_command_hermetic() {
+    #[tokio::test]
+    async fn test_run_command_hermetic() {
         let temp_dir = TempDir::new().unwrap();
         let env_file = temp_dir.path().join("env.cue");
         fs::write(
@@ -941,7 +941,7 @@ env: {
         .unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load_env(temp_dir.path()).unwrap();
+        manager.load_env(temp_dir.path()).await.unwrap();
 
         // Set a variable AFTER loading env, so it's not in original_env
         SyncEnv::set_var("TEST_PARENT_VAR", "should_not_exist").unwrap();
@@ -971,8 +971,8 @@ env: {
         let _ = SyncEnv::remove_var("TEST_PARENT_VAR");
     }
 
-    #[test]
-    fn test_run_command_with_secret_refs() {
+    #[tokio::test]
+    async fn test_run_command_with_secret_refs() {
         let temp_dir = TempDir::new().unwrap();
         let env_file = temp_dir.path().join("env.cue");
 
@@ -990,7 +990,7 @@ env: {
         .unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load_env(temp_dir.path()).unwrap();
+        manager.load_env(temp_dir.path()).await.unwrap();
 
         // Run a command that checks the variables
         #[cfg(unix)]
@@ -1010,8 +1010,8 @@ env: {
         assert_eq!(status, 0, "Command should succeed with all variables set");
     }
 
-    #[test]
-    fn test_run_command_preserves_path_and_home() {
+    #[tokio::test]
+    async fn test_run_command_preserves_path_and_home() {
         let temp_dir = TempDir::new().unwrap();
         let env_file = temp_dir.path().join("env.cue");
         fs::write(
@@ -1025,7 +1025,7 @@ env: {
         .unwrap();
 
         let mut manager = EnvManager::new();
-        manager.load_env(temp_dir.path()).unwrap();
+        manager.load_env(temp_dir.path()).await.unwrap();
 
         // Run a command that checks PATH and HOME are preserved
         #[cfg(unix)]
