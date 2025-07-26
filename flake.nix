@@ -22,7 +22,7 @@
     , treefmt-nix
     ,
     }:
-    flake-utils.lib.eachDefaultSystem
+    (flake-utils.lib.eachDefaultSystem
       (
         system:
         let
@@ -182,7 +182,7 @@
             checkPhase = ''
               runHook preCheck
               # Skip tests that require network access or special setup
-              cargo test --offline
+              cargo test
               runHook postCheck
             '';
 
@@ -205,41 +205,61 @@
           checks = {
             formatting = treefmt.config.build.check self;
 
-            # Run clippy
-            clippy = cuenv.overrideAttrs (oldAttrs: {
-              name = "cuenv-clippy";
-              buildPhase = ''
-                export HOME=$(mktemp -d)
-                export GOPATH="$HOME/go"
-                export GOCACHE="$HOME/go-cache"
-                export CGO_ENABLED=1
+            # Clippy check using main package build
+            clippy = pkgs.runCommand "cuenv-clippy"
+              {
+                nativeBuildInputs = nativeBuildInputs;
+                buildInputs = buildInputs;
+                src = ./.;
+              } ''
+              export HOME=$(mktemp -d)
+              export GOPATH="$HOME/go"
+              export GOCACHE="$HOME/go-cache"
+              export CGO_ENABLED=1
 
-                # Copy vendored dependencies
-                cp -r ${goVendor}/vendor libcue-bridge/
-                chmod -R u+w libcue-bridge
+              # Copy source
+              cp -r $src/* .
+              chmod -R u+w .
 
-                cargo clippy --offline -- -D warnings
-              '';
-              installPhase = ''
-                mkdir -p $out
-                touch $out/clippy-passed
-              '';
-            });
+              # Copy vendored dependencies
+              cp -r ${goVendor}/vendor libcue-bridge/
+              chmod -R u+w libcue-bridge
 
-            # Run tests
-            tests = cuenv.overrideAttrs (oldAttrs: {
-              name = "cuenv-tests";
-              doCheck = true;
-              checkPhase = ''
-                runHook preCheck
-                cargo test --offline
-                runHook postCheck
-              '';
-              installPhase = ''
-                mkdir -p $out
-                touch $out/tests-passed
-              '';
-            });
+              # Run clippy
+              cargo clippy --all-targets --all-features -- -D warnings
+
+              # Create output
+              mkdir -p $out
+              touch $out/clippy-success
+            '';
+
+            # Test check using main package build  
+            tests = pkgs.runCommand "cuenv-tests"
+              {
+                nativeBuildInputs = nativeBuildInputs;
+                buildInputs = buildInputs;
+                src = ./.;
+              } ''
+              export HOME=$(mktemp -d)
+              export GOPATH="$HOME/go"
+              export GOCACHE="$HOME/go-cache"
+              export CGO_ENABLED=1
+
+              # Copy source
+              cp -r $src/* .
+              chmod -R u+w .
+
+              # Copy vendored dependencies
+              cp -r ${goVendor}/vendor libcue-bridge/
+              chmod -R u+w libcue-bridge
+
+              # Run tests
+              cargo test --all-targets --all-features
+
+              # Create output
+              mkdir -p $out
+              touch $out/tests-success
+            '';
           };
 
           # Make formatter available
@@ -279,90 +299,92 @@
             '';
           };
         }
-      ) // {
-      # Home Manager module
-      homeManagerModules.default = { config, lib, pkgs, ... }:
-        with lib;
-        let
-          cfg = config.programs.cuenv;
-        in
-        {
-          options.programs.cuenv = {
-            enable = mkEnableOption "cuenv, a direnv alternative using CUE files";
+      )) // {
+      # Home Manager module  
+      homeManagerModules = {
+        default = { config, lib, pkgs, ... }:
+          with lib;
+          let
+            cfg = config.programs.cuenv;
+          in
+          {
+            options.programs.cuenv = {
+              enable = mkEnableOption "cuenv, a direnv alternative using CUE files";
 
-            package = mkOption {
-              type = types.package;
-              default = self.packages.${pkgs.system}.default;
-              defaultText = literalExpression "cuenv";
-              description = "The cuenv package to use.";
-            };
+              package = mkOption {
+                type = types.package;
+                default = self.packages.${pkgs.system}.default;
+                defaultText = literalExpression "cuenv";
+                description = "The cuenv package to use.";
+              };
 
-            enableBashIntegration = mkOption {
-              type = types.bool;
-              default = config.programs.bash.enable;
-              defaultText = literalExpression "config.programs.bash.enable";
-              description = ''
-                Whether to enable Bash integration.
-              '';
-            };
+              enableBashIntegration = mkOption {
+                type = types.bool;
+                default = config.programs.bash.enable;
+                defaultText = literalExpression "config.programs.bash.enable";
+                description = ''
+                  Whether to enable Bash integration.
+                '';
+              };
 
-            enableZshIntegration = mkOption {
-              type = types.bool;
-              default = config.programs.zsh.enable;
-              defaultText = literalExpression "config.programs.zsh.enable";
-              description = ''
-                Whether to enable Zsh integration.
-              '';
-            };
+              enableZshIntegration = mkOption {
+                type = types.bool;
+                default = config.programs.zsh.enable;
+                defaultText = literalExpression "config.programs.zsh.enable";
+                description = ''
+                  Whether to enable Zsh integration.
+                '';
+              };
 
-            enableFishIntegration = mkOption {
-              type = types.bool;
-              default = config.programs.fish.enable;
-              defaultText = literalExpression "config.programs.fish.enable";
-              description = ''
-                Whether to enable Fish integration.
-              '';
-            };
+              enableFishIntegration = mkOption {
+                type = types.bool;
+                default = config.programs.fish.enable;
+                defaultText = literalExpression "config.programs.fish.enable";
+                description = ''
+                  Whether to enable Fish integration.
+                '';
+              };
 
-            enableNushellIntegration = mkOption {
-              type = types.bool;
-              default = config.programs.nushell.enable;
-              defaultText = literalExpression "config.programs.nushell.enable";
-              description = ''
-                Whether to enable Nushell integration.
+              enableNushellIntegration = mkOption {
+                type = types.bool;
+                default = config.programs.nushell.enable;
+                defaultText = literalExpression "config.programs.nushell.enable";
+                description = ''
+                  Whether to enable Nushell integration.
                 
-                Note: Nushell support is experimental and may require manual configuration.
+                  Note: Nushell support is experimental and may require manual configuration.
+                '';
+              };
+            };
+
+            config = mkIf cfg.enable {
+              home.packages = [ cfg.package ];
+
+              programs.bash.initExtra = mkIf cfg.enableBashIntegration ''
+                # cuenv shell integration
+                eval "$(${cfg.package}/bin/cuenv init bash)"
+              '';
+
+              programs.zsh.initExtra = mkIf cfg.enableZshIntegration ''
+                # cuenv shell integration
+                eval "$(${cfg.package}/bin/cuenv init zsh)"
+              '';
+
+              programs.fish.interactiveShellInit = mkIf cfg.enableFishIntegration ''
+                # cuenv shell integration
+                ${cfg.package}/bin/cuenv init fish | source
+              '';
+
+              programs.nushell.extraConfig = mkIf cfg.enableNushellIntegration ''
+                # cuenv shell integration
+                # Note: This is experimental and may need adjustment based on your Nushell version
+                let cuenv_init = (${cfg.package}/bin/cuenv init nushell | str trim)
+                if not ($cuenv_init | is-empty) {
+                  source-env { $cuenv_init | from nuon }
+                }
               '';
             };
           };
-
-          config = mkIf cfg.enable {
-            home.packages = [ cfg.package ];
-
-            programs.bash.initExtra = mkIf cfg.enableBashIntegration ''
-              # cuenv shell integration
-              eval "$(${cfg.package}/bin/cuenv init bash)"
-            '';
-
-            programs.zsh.initExtra = mkIf cfg.enableZshIntegration ''
-              # cuenv shell integration
-              eval "$(${cfg.package}/bin/cuenv init zsh)"
-            '';
-
-            programs.fish.interactiveShellInit = mkIf cfg.enableFishIntegration ''
-              # cuenv shell integration
-              ${cfg.package}/bin/cuenv init fish | source
-            '';
-
-            programs.nushell.extraConfig = mkIf cfg.enableNushellIntegration ''
-              # cuenv shell integration
-              # Note: This is experimental and may need adjustment based on your Nushell version
-              let cuenv_init = (${cfg.package}/bin/cuenv init nushell | str trim)
-              if not ($cuenv_init | is-empty) {
-                source-env { $cuenv_init | from nuon }
-              }
-            '';
-          };
-        };
+      };
     };
 }
