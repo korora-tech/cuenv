@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use crate::errors::{Error, Result};
 use fs2::FileExt;
 use once_cell::sync::Lazy;
 use std::env;
@@ -32,7 +32,7 @@ impl SyncEnv {
     pub fn set_var<K: AsRef<str>, V: AsRef<str>>(key: K, value: V) -> Result<()> {
         let _guard = ENV_MUTEX
             .lock()
-            .map_err(|e| anyhow::anyhow!("Failed to acquire environment lock: {}", e))?;
+            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
 
         env::set_var(key.as_ref(), value.as_ref());
         Ok(())
@@ -42,7 +42,7 @@ impl SyncEnv {
     pub fn var<K: AsRef<str>>(key: K) -> Result<Option<String>> {
         let _guard = ENV_MUTEX
             .lock()
-            .map_err(|e| anyhow::anyhow!("Failed to acquire environment lock: {}", e))?;
+            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
 
         Ok(env::var(key.as_ref()).ok())
     }
@@ -51,7 +51,7 @@ impl SyncEnv {
     pub fn remove_var<K: AsRef<str>>(key: K) -> Result<()> {
         let _guard = ENV_MUTEX
             .lock()
-            .map_err(|e| anyhow::anyhow!("Failed to acquire environment lock: {}", e))?;
+            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
 
         env::remove_var(key.as_ref());
         Ok(())
@@ -61,7 +61,7 @@ impl SyncEnv {
     pub fn vars() -> Result<Vec<(String, String)>> {
         let _guard = ENV_MUTEX
             .lock()
-            .map_err(|e| anyhow::anyhow!("Failed to acquire environment lock: {}", e))?;
+            .map_err(|e| Error::environment("ENV_MUTEX", format!("Failed to acquire environment lock: {}", e)))?;
 
         Ok(env::vars().collect())
     }
@@ -82,11 +82,11 @@ impl InstanceLock {
             .write(true)
             .truncate(false)
             .open(&lock_path)
-            .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
+            .map_err(|e| Error::file_system(&lock_path, "open lock file", e))?;
 
         // Try to acquire exclusive lock
         file.try_lock_exclusive()
-            .with_context(|| "Another cuenv instance is already running")?;
+            .map_err(|_| Error::configuration("Another cuenv instance is already running"))?;
 
         Ok(Self { file: Some(file) })
     }
@@ -100,11 +100,11 @@ impl InstanceLock {
             .write(true)
             .truncate(false)
             .open(&lock_path)
-            .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
+            .map_err(|e| Error::file_system(&lock_path, "open lock file", e))?;
 
         // Acquire exclusive lock, blocking until available
         file.lock_exclusive()
-            .with_context(|| "Failed to acquire exclusive lock")?;
+            .map_err(|_| Error::configuration("Failed to acquire exclusive lock"))?;
 
         Ok(Self { file: Some(file) })
     }

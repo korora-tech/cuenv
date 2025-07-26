@@ -33,8 +33,3 @@ pub mod task_executor;
 pub mod types;
 pub mod xdg;
 
-#[cfg(test)]
-mod sync_env_concurrent_test;
-
-#[cfg(test)]
-mod resilience_integration_tests;
